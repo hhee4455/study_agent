@@ -14,11 +14,39 @@
 from __future__ import annotations
 
 import filecmp
+import fnmatch
 import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+# 머지에서 제외 — 의존성/캐시/VCS 디렉토리는 ws/main에 안 옮김.
+# 멤버가 만들었어도 그 멤버 ws/{id}/ 안에는 남고 main만 깨끗.
+SKIP_DIRS = {
+    ".venv", "venv", "env",
+    "node_modules",
+    "__pycache__",
+    ".git",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".tox",
+    "dist", "build",
+    ".cache",
+    ".gradle", ".idea", ".vscode",
+}
+SKIP_FILE_GLOBS = (
+    "*.pyc", "*.pyo", "*.pyd",
+    ".DS_Store",
+    "*.egg-info",  # 디렉토리 + 파일 둘 다
+)
+
+
+def _should_skip(entry: Path) -> bool:
+    name = entry.name
+    if entry.is_dir():
+        return name in SKIP_DIRS or any(fnmatch.fnmatch(name, g) for g in SKIP_FILE_GLOBS)
+    return any(fnmatch.fnmatch(name, g) for g in SKIP_FILE_GLOBS)
 
 
 @dataclass
@@ -27,6 +55,7 @@ class MergeReport:
     copied: list[str] = field(default_factory=list)       # 새로 복사된 상대 경로
     conflicts: list[str] = field(default_factory=list)    # 충돌 상대 경로
     skipped_same: list[str] = field(default_factory=list) # 동일해서 skip
+    skipped_pattern: list[str] = field(default_factory=list)  # SKIP_DIRS/GLOBS로 제외
     conflict_report_path: str = ""                         # 충돌 시 .md 경로
 
     def ok(self) -> bool:
@@ -35,7 +64,8 @@ class MergeReport:
     def summary(self) -> str:
         return (
             f"merge {self.agent_id}: copied={len(self.copied)} "
-            f"conflicts={len(self.conflicts)} same={len(self.skipped_same)}"
+            f"conflicts={len(self.conflicts)} same={len(self.skipped_same)} "
+            f"skip_pattern={len(self.skipped_pattern)}"
         )
 
 
@@ -76,6 +106,11 @@ class WorkspaceMerger:
             # P5 결정: symlink는 우회 벡터. 머지에서 거부 (conflict로 기록).
             if entry.is_symlink():
                 report.conflicts.append(str(rel) + " (symlink rejected)")
+                continue
+
+            # venv/cache/node_modules/.git 등은 main에 안 옮김. 멤버 ws에 남아있음.
+            if _should_skip(entry):
+                report.skipped_pattern.append(str(rel))
                 continue
 
             if entry.is_dir():

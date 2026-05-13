@@ -556,6 +556,51 @@ def test_verifier_runs_sanity_before_shell_exec():
         assert (ws / "important.txt").read_text() == "keep me"
 
 
+# ---------- merge skip patterns (.venv/node_modules/cache 제외) ----------
+
+def test_workspace_merge_skips_venv_and_cache():
+    from lead.workspace import WorkspaceMerger
+    with tempfile.TemporaryDirectory() as d:
+        main = Path(d) / "main"
+        member = Path(d) / "M001"
+        conflicts = Path(d) / "conflicts"
+        main.mkdir()
+        member.mkdir()
+
+        # 진짜 산출물
+        (member / "src.py").write_text("real code")
+        # 제외돼야 할 것들
+        (member / ".venv").mkdir()
+        (member / ".venv" / "lib.py").write_text("dep")
+        (member / "node_modules").mkdir()
+        (member / "node_modules" / "x.js").write_text("x")
+        (member / "__pycache__").mkdir()
+        (member / "__pycache__" / "a.pyc").write_text("bin")
+        (member / ".git").mkdir()
+        (member / ".git" / "config").write_text("vcs")
+        (member / ".pytest_cache").mkdir()
+        (member / ".DS_Store").write_text("macos")
+
+        merger = WorkspaceMerger(main, conflicts)
+        rep = merger.merge(member, "M001")
+
+        # 진짜 코드만 머지됨
+        assert (main / "src.py").exists()
+        assert "src.py" in rep.copied
+        # 제외 디렉토리/파일은 main에 없음
+        assert not (main / ".venv").exists()
+        assert not (main / "node_modules").exists()
+        assert not (main / "__pycache__").exists()
+        assert not (main / ".git").exists()
+        assert not (main / ".pytest_cache").exists()
+        assert not (main / ".DS_Store").exists()
+        # skipped_pattern에 보고됨
+        skipped = set(rep.skipped_pattern)
+        assert ".venv" in skipped
+        assert "node_modules" in skipped
+        assert "__pycache__" in skipped
+
+
 # ---------- path_guard (P5, 2026-05-13 토론 결정 적용) ----------
 
 def test_path_guard_rejects_absolute_and_traversal():

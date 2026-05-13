@@ -35,6 +35,11 @@ id는 파일 내 최대 id + 1. ts는 현재 UTC ISO8601 (`Z` 끝).
 - 서브-팀원 채용 금지 (너는 leaf 작업자).
 - 메인 워크스페이스 (cwd 밖) 쓰기 금지.
 - `[STATUS:*]` 토큰은 출력 마지막 줄에 정확히 한 번만.
+- **`.venv` / `node_modules` / 의존성 트리 cwd에 만들지 마라.**
+  - `pip install`, `npm install`, `poetry install` 같은 거 너의 ws에서 실행 금지.
+  - 의존성은 `pyproject.toml` / `requirements.txt` / `package.json`에 선언만.
+  - 실제 설치는 ws/main 전체 통합 후 사용자가 한 번 수행 (그게 정상적인 격리 모델).
+  - 테스트 실행이 필요하면 그냥 명령을 `verification_checks`에 적어두고, 실행은 머지 후.
 
 ## 첫 행동
 1. `{brief}` Read
