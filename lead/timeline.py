@@ -130,6 +130,11 @@ class TimelineRenderer:
                 f"code-janitor: archived={e.get('archived', 0)} "
                 f"kept={e.get('kept', 0)} → {e.get('archive_dir', '')}"
             )
+        if kind == "conflict_debated":
+            return "🤝", (
+                f"충돌 토론 ({e.get('debate_id', '?')}) "
+                f"file={e.get('file', '?')} agent={e.get('agent_id', '?')}"
+            )
         if kind == "error":
             return "⚠", f"{actor_or_blank(e)} error: {_truncate(e.get('error', ''), 150)}"
         return "·", f"{kind}: {_truncate(json.dumps(e, ensure_ascii=False), 150)}"

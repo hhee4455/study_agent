@@ -78,8 +78,8 @@ def parse_args():
         help="Anthropic critique-refine 패턴: 각 멤버 산출물에 AdversarialVerifier 1회 통과. 비용 증가, 품질 ↑.",
     )
     p.add_argument(
-        "--max-parallel", type=int, default=5,
-        help="동시 실행 가능한 팀원 수 (default 5). 너무 크면 burst rate limit. 1=직렬.",
+        "--max-parallel", type=int, default=3,
+        help="동시 실행 가능한 팀원 수 (default 3). 너무 크면 burst rate limit + 충돌 ↑. 1=직렬.",
     )
     return p.parse_args()
 
