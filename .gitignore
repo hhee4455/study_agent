@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# 가상환경 / IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 런타임 상태 — meta/는 spec(requirements.md)만 트래킹, 나머지는 제외
+meta/state/
+meta/ws/
+meta/logs/
+
+# 라이브/스모크 출력
+*.out
+*.pid
+*.bak1
+*.bak2
+*.bak3
+*.archive.md
+
+# 백업 / 임시
+*.bak
+*.tmp
+*~
+
+# 산출물 / 압축
+*.tgz
+*.tar.gz

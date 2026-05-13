@@ -1,0 +1,766 @@
+"""TeamLead — Python 루프 + 짧은 LLM 호출 패턴의 팀장 에이전트.
+
+매 tick:
+  1. 새 메시지 스캔 (mailbox)
+  2. WAITING 멤버 → LLM이 답변 작성 → mailbox.md에 reply append → 상태 RUNNING → 재spawn
+  3. DONE 멤버 → verifier.run → 통과면 workspace merge → registry DONE/FAILED
+  4. plan.md에 미할당 sub-goal 있으면 → LLM이 brief 작성 → 멤버 채용 → spawn
+  5. timeline.md 재렌더
+  6. 종료 조건: plan.md 모두 체크되거나 budget 초과
+
+plan.md 형식:
+    # Plan
+    - [ ] G-foo: bootstrap python project
+    - [x] G-bar: write README  (assigned: M001)
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from core.budget import BudgetExceeded, BudgetManager
+from core.health import HealthMonitor
+from core.llm import LLMClient
+from core.rate_limit import RateLimitExhausted
+from core.verifier import Check, Verifier
+
+from lead.mailbox import Message, append_message, parse_messages, scan_new
+from lead.member import HireBrief, MemberSpawner, SpawnResult
+from lead.prompts import render_split
+from lead.registry import AgentRegistry
+from lead.timeline import TimelineRenderer
+from lead.workspace import WorkspaceMerger
+
+
+# Plan goal 라인 형식
+GOAL_LINE_RE = re.compile(r"^- \[(?P<done>[ xX])\] (?P<id>G-[A-Za-z0-9_-]+): (?P<title>.+?)(?:\s+\(assigned: (?P<assigned>[A-Za-z0-9_-]+)\))?\s*$")
+
+# 단일 멤버 재spawn 안전 상한 (무한 핑퐁 방지용 마지막 방어선; budget이 1차 차단).
+RESUME_SAFETY_CAP = 20
+
+# 진행 정체로 판단할 연속 빈 tick 수 (멤버 spawn은 시간 걸리므로 너무 짧지 않게).
+NO_PROGRESS_CAP = 10
+
+# code-janitor 자율 판단 주기 (이만큼 hire 횟수마다 한 번 판단).
+JANITOR_CHECK_EVERY_HIRES = 10
+
+
+@dataclass
+class Goal:
+    id: str
+    title: str
+    done: bool = False
+    assigned: str = ""
+
+
+def parse_plan(plan_md: Path) -> list[Goal]:
+    """plan.md를 파싱해 Goal 리스트 반환."""
+    if not plan_md.exists():
+        return []
+    goals = []
+    for line in plan_md.read_text(encoding="utf-8").splitlines():
+        m = GOAL_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        goals.append(Goal(
+            id=m.group("id"),
+            title=m.group("title").strip(),
+            done=m.group("done").lower() == "x",
+            assigned=m.group("assigned") or "",
+        ))
+    return goals
+
+
+def render_plan(plan_md: Path, header: str, goals: list[Goal]) -> None:
+    lines = [f"# {header}", ""]
+    for g in goals:
+        check = "x" if g.done else " "
+        assigned = f" (assigned: {g.assigned})" if g.assigned else ""
+        lines.append(f"- [{check}] {g.id}: {g.title}{assigned}")
+    plan_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class TeamLead:
+    def __init__(
+        self,
+        spec: str,
+        spec_name: str,
+        lead_state_dir: Path,        # meta/state/lead/
+        agents_root: Path,            # meta/state/agents/
+        session_logs_root: Path,      # meta/state/session_logs/
+        ws_root: Path,                # ws/
+        ws_main: Path,                # ws/main/ (= args.workspace)
+        llm: LLMClient,
+        budget: BudgetManager,
+        health: Optional[HealthMonitor] = None,
+        default_model: str = "opus",
+        enable_evaluator: bool = False,
+        max_parallel: int = 5,
+    ):
+        self.spec = spec
+        self.spec_name = spec_name
+        self.lead_state_dir = lead_state_dir
+        self.agents_root = agents_root
+        self.session_logs_root = session_logs_root
+        self.ws_root = ws_root
+        self.ws_main = ws_main
+        self.llm = llm
+        self.budget = budget
+        self.health = health
+        self.enable_evaluator = enable_evaluator
+        self.max_parallel = max(1, max_parallel)
+
+        lead_state_dir.mkdir(parents=True, exist_ok=True)
+        agents_root.mkdir(parents=True, exist_ok=True)
+        ws_root.mkdir(parents=True, exist_ok=True)
+        ws_main.mkdir(parents=True, exist_ok=True)
+
+        self.plan_md = lead_state_dir / "plan.md"
+        self.registry = AgentRegistry(lead_state_dir, agents_root)
+        self.spawner = MemberSpawner(agents_root, ws_root, lead_state_dir.parent, default_model=default_model)
+        self.merger = WorkspaceMerger(ws_main, lead_state_dir / "conflicts")
+        self.timeline = TimelineRenderer(lead_state_dir, agents_root, session_logs_root)
+
+        # 병렬 spawn: agent_id → 진행 중인 spawn future.
+        # SessionManager는 각자 다른 cwd/log_dir 쓰니 동시 호출 OK.
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._pending: dict[str, Future] = {}
+        # 멤버 브리프 캐시 (resume 시 재구성용; system_prompt.md만으론 부족한 미션 등 보존)
+        self._briefs: dict[str, HireBrief] = {}
+        # janitor 판단 카운터 (hire 횟수 누적)
+        self._hires_since_janitor = 0
+
+    # ---------- 진입점 ----------
+
+    def run(self) -> int:
+        """tick 루프. 종료 조건: 모든 goal done | budget 초과 | 진행 불가."""
+        self._log("=" * 60)
+        self._log(f"팀장 시작 | spec={self.spec_name} | max_parallel={self.max_parallel}")
+        self._log("=" * 60)
+
+        if not self.plan_md.exists():
+            self._initial_plan()
+
+        consecutive_no_progress = 0
+        with ThreadPoolExecutor(max_workers=self.max_parallel,
+                                 thread_name_prefix="spawn") as ex:
+            self._executor = ex
+            try:
+                while (
+                    self.budget.can_continue()
+                    or self._pending
+                    or self._has_unverified_done()
+                ):
+                    try:
+                        progressed = self._tick()
+                    except BudgetExceeded:
+                        # in-flight 다 끝나길 기다림
+                        self._drain_pending()
+                        raise
+                    except RateLimitExhausted as e:
+                        self._log(f"🚫 rate limit 한도: {e}")
+                        self._drain_pending()
+                        return 4
+
+                    self.timeline.render()
+
+                    goals = parse_plan(self.plan_md)
+                    if goals and all(g.done for g in goals) and not self._pending:
+                        self._log("\n🎉 모든 goal 완료")
+                        self.timeline.render()
+                        return 0
+
+                    if not progressed:
+                        consecutive_no_progress += 1
+                        if consecutive_no_progress >= NO_PROGRESS_CAP and not self._pending:
+                            summary = self._registry_summary()
+                            self._log(f"⏸️  {NO_PROGRESS_CAP}회 연속 무진행. registry={summary}")
+                            self.timeline.emit("lead", "error",
+                                               error=f"no progress (registry={summary})")
+                            return 3
+                    else:
+                        consecutive_no_progress = 0
+
+                    # in-flight가 있는데 새 hire 없으면 짧게 쉬어 CPU 안 태움
+                    if self._pending and not progressed:
+                        time.sleep(0.5)
+
+                self._log("⏰ budget 한도")
+                return 4
+            finally:
+                self._executor = None
+
+    # ---------- tick ----------
+
+    def _tick(self) -> bool:
+        """1 사이클. 어떤 변화가 있었으면 True."""
+        progressed = False
+
+        # 0) 완료된 spawn future 수집 → _post_spawn 처리
+        if self._collect_completed_spawns():
+            progressed = True
+
+        # 1) 새 메시지 (status, question, delivery) 스캔
+        new_msgs = scan_new(self.agents_root, self.registry.last_seen_map())
+        for m in new_msgs:
+            self._log(f"  📨 {m.from_}→{m.to} {m.kind} #{m.id}")
+            agent_id = m.from_ if m.to == "lead" else m.to
+            rec = self.registry.get(agent_id)
+            if rec:
+                self.registry.update(agent_id, last_msg_id=m.id)
+                progressed = True
+
+        # 2) WAITING 멤버 → 답변 → 재spawn (비동기 submit)
+        for rec in self.registry.by_status("WAITING"):
+            if rec.agent_id in self._pending:
+                continue  # 이미 spawn 진행 중
+            if not self.budget.can_continue():
+                break
+            if self._handle_waiting(rec.agent_id):
+                progressed = True
+
+        # 3) DONE 멤버 → 검증 → merge
+        for rec in self.registry.by_status("DONE"):
+            if rec.agent_id in self._pending:
+                continue  # 재spawn 중
+            if rec.completed_at and self._already_merged(rec.agent_id):
+                continue
+            if self._verify_and_merge(rec.agent_id):
+                progressed = True
+
+        # 4) 미할당 goal → 채용 (in-flight 수가 max_parallel 미만일 때 반복)
+        while len(self._pending) < self.max_parallel and self.budget.can_continue():
+            if not self._hire_next_unassigned():
+                break
+            progressed = True
+            self._hires_since_janitor += 1
+
+        # 5) 주기적으로 lead 자체 판단: 지금 code-janitor 돌릴 시점?
+        if self._hires_since_janitor >= JANITOR_CHECK_EVERY_HIRES:
+            self._hires_since_janitor = 0
+            if self._should_run_code_janitor():
+                self._run_code_janitor()
+                progressed = True
+
+        return progressed
+
+    # ---------- LLM 결정 ----------
+
+    def _initial_plan(self) -> None:
+        """spec → plan.md 초기 분해 (한 번만)."""
+        self._log("🧭 plan.md 초기 분해")
+        system, user = render_split(
+            "plan_initial", spec_name=self.spec_name, spec=self.spec[:6000]
+        )
+        try:
+            raw = self.llm.call(system, user, tier="sonnet")
+        except Exception as e:
+            self._log(f"⚠️  초기 plan LLM 실패, fallback: {e}")
+            self.plan_md.write_text(
+                "# Plan\n- [ ] G-001-bootstrap: 요구서를 읽고 첫 작업 결정\n",
+                encoding="utf-8",
+            )
+            self.timeline.emit("lead", "plan_update", note="fallback initial plan")
+            return
+
+        # 코드 펜스 안의 내용만 추출
+        m = re.search(r"```[a-zA-Z]*\s*\n(.*?)\n```", raw, re.DOTALL)
+        body = (m.group(1) if m else raw).strip()
+        if not body.lower().startswith("# plan"):
+            body = "# Plan\n" + body
+        self.plan_md.write_text(body + "\n", encoding="utf-8")
+        self.timeline.emit("lead", "plan_update", note="초기 plan 작성됨")
+
+    def _hire_next_unassigned(self) -> bool:
+        goals = parse_plan(self.plan_md)
+        unassigned = [g for g in goals if not g.done and not g.assigned]
+        if not unassigned:
+            return False
+        target = unassigned[0]
+        self._log(f"👷 채용 시도 → {target.id}: {target.title}")
+
+        brief_data = self._llm_hire_brief(target)
+        if not brief_data:
+            return False
+
+        agent_id = self.registry.next_agent_id()
+        brief = HireBrief(
+            agent_id=agent_id,
+            goal_id=target.id,
+            mission=brief_data["mission"],
+            deliverables=brief_data["deliverables"],
+            verification_checks=brief_data.get("verification_checks", []),
+            system_prompt=brief_data["system_prompt"],
+            allowed_tools=brief_data.get("allowed_tools"),
+            seed_files=brief_data.get("seed_files"),
+            verify=bool(brief_data.get("verify", False)),
+        )
+        self.spawner.write_brief(brief)
+        self.registry.register(agent_id, goal_id=target.id)
+
+        # plan.md 갱신 (assigned 마킹)
+        target.assigned = agent_id
+        render_plan(self.plan_md, "Plan", goals)
+        self.timeline.emit("lead", "hire", agent_id=agent_id, goal=f"{target.id}: {target.title}")
+
+        # 첫 instruction
+        append_message(
+            self.agents_root / agent_id / "mailbox.md",
+            from_="lead", to=agent_id, kind="instruction",
+            body=f"# 첫 지시\n{brief.mission}\n\n작업 시작.",
+        )
+
+        self._submit_spawn(brief, resume_count=0)
+        return True
+
+    def _llm_hire_brief(self, goal: Goal) -> Optional[dict]:
+        """LLM에게 채용 brief(JSON) 작성 시키기."""
+        system, user = render_split(
+            "hire_brief",
+            spec=self.spec[:3000],
+            goal_id=goal.id,
+            goal_title=goal.title,
+        )
+        try:
+            from core.llm import parse_json_loose
+            raw = self.llm.call(system, user, tier="sonnet")
+            data = parse_json_loose(raw)
+            if not data or "mission" not in data:
+                return None
+            data.setdefault("deliverables", [])
+            data.setdefault("verification_checks", [])
+            data.setdefault("system_prompt", "너는 능력 있는 엔지니어. 미션 완수 후 검증 기준 통과.")
+            return data
+        except Exception as e:
+            self._log(f"  ⚠️ hire-brief LLM 실패: {e}")
+            self.timeline.emit("lead", "error", error=f"hire-brief: {e}", goal=goal.id)
+            return None
+
+    def _handle_waiting(self, agent_id: str) -> bool:
+        rec = self.registry.get(agent_id)
+        mbox = self.agents_root / agent_id / "mailbox.md"
+        msgs = parse_messages(mbox)
+        last_q = next((m for m in reversed(msgs) if m.kind == "question"), None)
+        if last_q is None:
+            # WAITING인데 question 없음 — 비정상. RUNNING으로 되돌리고 재spawn 시도
+            self._log(f"  ⚠️ {agent_id} WAITING인데 question 없음, RUNNING 복귀")
+            self.registry.set_status(agent_id, "RUNNING")
+            return False
+
+        # 이미 답변 보냈는지 (last_q 이후 reply 있나)
+        if any(m.kind == "reply" and (m.ref == last_q.id) for m in msgs if m.id > last_q.id):
+            # 답변은 줬는데 멤버가 아직 재spawn 안 됨 → 재spawn
+            return self._resume_member(agent_id)
+
+        # 1차 판단: 단순 답변으로 충분한가 vs 4-way 토론 필요한가
+        # (간단한 yes/no는 직접, 보안/아키텍처/논쟁적 결정은 토론)
+        is_high_stakes = self._is_high_stakes_question(last_q.body)
+        if is_high_stakes:
+            self._log(f"  ⚖️  {agent_id} 질문 high-stakes 판정 → 토론 소집")
+            reply_body = self._convene_debate_for_question(agent_id, last_q, msgs)
+        else:
+            self._log(f"  💬 {agent_id} 질문 답변 작성")
+            reply_body = self._llm_reply(agent_id, last_q, msgs)
+        append_message(mbox, from_="lead", to=agent_id, kind="reply",
+                       body=reply_body, ref=last_q.id)
+        self.timeline.emit("lead", "reply", to=agent_id, ref=last_q.id,
+                           summary=reply_body[:200])
+        return self._resume_member(agent_id)
+
+    def _is_high_stakes_question(self, question_body: str) -> bool:
+        """LLM(haiku)에게 짧게 판단 시킴. 보안/아키텍처/논쟁적 trade-off면 True."""
+        system = (
+            "너는 팀장의 분류 보조다. 팀원의 질문이 단순 yes/no/방향 답변으로 충분한지, "
+            "아니면 여러 관점이 필요한 결정인지 판정. JSON 한 줄만 출력."
+        )
+        user = (
+            f"# 질문\n{question_body[:1500]}\n\n"
+            "# 출력 (정확히 JSON)\n"
+            '{"high_stakes": true|false, "reason": "한 줄"}\n\n'
+            "high_stakes=true 기준: 보안/안전, 아키텍처 갈래, 비가역 변경, 비용 큰 trade-off, "
+            "정책 결정. 단순 사실/구현 디테일/방향 확인은 false."
+        )
+        try:
+            from core.llm import parse_json_loose
+            raw = self.llm.call(system, user, tier="haiku")
+            data = parse_json_loose(raw)
+            return bool(data.get("high_stakes"))
+        except Exception as e:
+            self._log(f"  ⚠️ high-stakes 판정 실패, 단순 답변으로 fallback: {e}")
+            return False
+
+    def _convene_debate_for_question(
+        self, agent_id: str, question: Message, all_msgs: list[Message]
+    ) -> str:
+        """4-way 토론(claude×3 + codex×1) → 자동 결정 → reply 본문 반환."""
+        from agents.debate import DebatePanel
+
+        brief = (self.agents_root / agent_id / "brief.md").read_text(encoding="utf-8")
+        recent = all_msgs[-6:]
+        thread = "\n\n".join(
+            f"### {m.from_}→{m.to} {m.kind} #{m.id}\n{m.body}" for m in recent
+        )
+        context = (
+            f"# 멤버 brief\n{brief[:1500]}\n\n"
+            f"# 최근 mailbox 스레드\n{thread[:2000]}\n\n"
+            f"# spec 발췌\n{self.spec[:1500]}"
+        )
+        panel = DebatePanel(self.lead_state_dir / "debates", self.llm, max_rounds=2)
+        debate_id = f"{agent_id}-q{question.id}-{int(time.time())}"
+        try:
+            outcome = panel.deliberate(
+                question=question.body, context=context,
+                debate_id=debate_id, auto_decide=True,
+            )
+        except Exception as e:
+            self._log(f"  ⚠ 토론 실패, 단순 답변으로 fallback: {e}")
+            self.timeline.emit("lead", "error", error=f"debate: {e}",
+                               agent_id=agent_id)
+            return self._llm_reply(agent_id, question, all_msgs)
+
+        self.timeline.emit(
+            "lead", "debate_decided", agent_id=agent_id,
+            debate_id=debate_id, summary=outcome.decision[:200],
+        )
+        return (
+            f"## Reply (4-way 토론 결정)\n"
+            f"_토론 전문: `{outcome.md_path}` — 사후 검토 가능_\n\n"
+            f"{outcome.decision}"
+        )
+
+    def _llm_reply(self, agent_id: str, question: Message, all_msgs: list[Message]) -> str:
+        brief = (self.agents_root / agent_id / "brief.md").read_text(encoding="utf-8")
+        recent = all_msgs[-6:]
+        thread = "\n\n".join(
+            f"### {m.from_}→{m.to} {m.kind} #{m.id}\n{m.body}" for m in recent
+        )
+        system, user = render_split(
+            "reply",
+            brief=brief[:2000],
+            thread=thread,
+            q_id=question.id,
+            q_body=question.body,
+        )
+        try:
+            return self.llm.call(system, user, tier="sonnet").strip()
+        except Exception as e:
+            self.timeline.emit("lead", "error", error=f"reply LLM: {e}", agent_id=agent_id)
+            return f"## Reply\n(자동 답변 실패: {e}) — 너의 판단으로 진행."
+
+    def _resume_member(self, agent_id: str) -> bool:
+        rec = self.registry.get(agent_id)
+        if rec.last_resume >= RESUME_SAFETY_CAP:
+            self._log(f"  ⊘ {agent_id} resume 한도 초과 → FAILED")
+            self.registry.update(agent_id, status="FAILED",
+                                 last_error="resume 한도 초과")
+            self.timeline.emit("lead", "fire", agent_id=agent_id, reason="resume 한도 초과")
+            return False
+
+        next_n = rec.last_resume + 1
+        self.registry.update(agent_id, last_resume=next_n, status="RUNNING")
+        brief = self._briefs.get(agent_id) or self._reconstruct_brief(agent_id)
+        if not brief:
+            self.registry.update(agent_id, status="FAILED", last_error="brief 복원 실패")
+            return False
+
+        self._submit_spawn(brief, resume_count=next_n)
+        return True
+
+    def _reconstruct_brief(self, agent_id: str) -> Optional[HireBrief]:
+        """brief.md + system_prompt.md에서 HireBrief 복원."""
+        agent_dir = self.agents_root / agent_id
+        sp = agent_dir / "system_prompt.md"
+        if not sp.exists():
+            return None
+        rec = self.registry.get(agent_id)
+        return HireBrief(
+            agent_id=agent_id,
+            goal_id=rec.goal_id if rec else "",
+            mission="(brief.md 참조)",
+            deliverables=[],
+            verification_checks=[],
+            system_prompt=sp.read_text(encoding="utf-8"),
+        )
+
+    def _spawn_member(self, brief: HireBrief, resume_count: int) -> SpawnResult:
+        """동기 spawn (worker thread 내부에서 호출됨)."""
+        self._log(f"  ▶ spawn {brief.agent_id} (r={resume_count})")
+        try:
+            return self.spawner.spawn(brief, resume_count=resume_count)
+        except Exception as e:
+            self._log(f"  ⚠ spawn 예외 ({brief.agent_id}): {e}")
+            self.timeline.emit("lead", "error", error=f"spawn: {e}", agent_id=brief.agent_id)
+            return SpawnResult(agent_id=brief.agent_id, status="FAILED",
+                               raw_output="", error=str(e))
+
+    def _submit_spawn(self, brief: HireBrief, resume_count: int) -> None:
+        """Executor에 spawn submit. 메인 스레드에서만 호출. 등록 + 상태 RUNNING."""
+        if self._executor is None:
+            # fallback: 동기 (executor 컨텍스트 밖, 예: 테스트에서)
+            result = self._spawn_member(brief, resume_count)
+            self._post_spawn(brief.agent_id, result, brief)
+            return
+        agent_id = brief.agent_id
+        if agent_id in self._pending:
+            return  # 이미 진행 중
+        self.registry.set_status(agent_id, "RUNNING")
+        self._briefs[agent_id] = brief
+        future = self._executor.submit(self._spawn_member, brief, resume_count)
+        self._pending[agent_id] = future
+
+    def _collect_completed_spawns(self) -> bool:
+        """완료된 spawn future를 수집해 _post_spawn 처리. 진행 있었으면 True."""
+        if not self._pending:
+            return False
+        done_ids = [aid for aid, fut in self._pending.items() if fut.done()]
+        if not done_ids:
+            return False
+        for aid in done_ids:
+            fut = self._pending.pop(aid)
+            brief = self._briefs.get(aid)
+            try:
+                result = fut.result()
+            except Exception as e:
+                self._log(f"  ⚠ spawn future 예외 ({aid}): {e}")
+                self.timeline.emit("lead", "error", error=f"future: {e}", agent_id=aid)
+                self.registry.update(aid, status="FAILED", last_error=str(e)[:300])
+                continue
+            self._post_spawn(aid, result, brief)
+        return True
+
+    def _drain_pending(self) -> None:
+        """모든 in-flight future를 끝까지 기다리고 _post_spawn 처리. 종료 경로용."""
+        if not self._pending:
+            return
+        self._log(f"  ⏳ in-flight {len(self._pending)} drain")
+        # 끝날 때까지 폴링
+        while self._pending:
+            self._collect_completed_spawns()
+            if self._pending:
+                time.sleep(0.5)
+
+    def _post_spawn(self, agent_id: str, result: SpawnResult, brief: HireBrief) -> None:
+        if result.status == "DONE":
+            self.registry.set_status(agent_id, "DONE")
+        elif result.status == "WAITING":
+            self.registry.set_status(agent_id, "WAITING")
+        elif result.status == "FAILED":
+            self.registry.update(agent_id, status="FAILED",
+                                 last_error=result.error[:300])
+            self.timeline.emit("lead", "fire", agent_id=agent_id,
+                               reason=f"멤버가 FAILED 보고: {result.error[:140]}")
+        else:
+            # 알 수 없는 상태 — 토큰 미부착. 일단 WAITING으로 두고 다음 사이클에 봄
+            self.registry.set_status(agent_id, "WAITING")
+            self._log(f"  ⚠ {agent_id} 상태 토큰 없음 ({result.status}); WAITING로 보류")
+
+    # ---------- 검증 + 머지 ----------
+
+    def _verify_and_merge(self, agent_id: str) -> bool:
+        rec = self.registry.get(agent_id)
+        agent_dir = self.agents_root / agent_id
+        ws = self.ws_root / agent_id
+
+        # brief.md에서 verification_checks 복원 — md 파싱하지 않고 brief.md에 inline JSON 추가
+        # 간단화: 검증 checks가 비어있으면 통과로 간주 (멤버 자체 보고만 신뢰)
+        checks_inline = agent_dir / "checks.json"
+        checks: list[Check] = []
+        if checks_inline.exists():
+            try:
+                raw = json.loads(checks_inline.read_text())
+                checks = [Check.from_dict(c) for c in raw]
+            except Exception:
+                pass
+
+        if checks:
+            verifier = Verifier(ws)
+            try:
+                report = verifier.run(checks)
+            except Exception as e:
+                self.registry.update(agent_id, status="FAILED",
+                                     last_error=f"verify 예외: {e}")
+                self.timeline.emit("lead", "verify_fail", agent_id=agent_id,
+                                   detail=f"예외: {e}")
+                return True
+            if not report.passed:
+                self.registry.update(agent_id, status="FAILED",
+                                     last_error=report.failure_summary()[:300])
+                self.timeline.emit("lead", "verify_fail", agent_id=agent_id,
+                                   detail=report.failure_summary())
+                return True
+            self.timeline.emit("lead", "verify_pass", agent_id=agent_id,
+                               checks=len(checks))
+        else:
+            self.timeline.emit("lead", "verify_pass", agent_id=agent_id, checks=0)
+
+        # Evaluator (Anthropic critique-refine 패턴) — 1 cycle만, 무한 루프 방지.
+        # P4 결정(2026-05-13): 전역 --enable-evaluator는 디버그용(모든 hire 강제),
+        # 평상시엔 brief.verify=true인 멤버만 평가 (lead가 hire 시점에 판단).
+        # budget 한도 후엔 skip (graceful drain — verify/merge는 진행되도록).
+        brief_cached = self._briefs.get(agent_id)
+        per_hire_verify = bool(brief_cached and brief_cached.verify)
+        evaluator_ok = (
+            (self.enable_evaluator or per_hire_verify)
+            and self.budget.can_continue()
+            and not (agent_dir / ".evaluated").exists()
+        )
+        if evaluator_ok:
+            critique = self._run_evaluator(agent_id, agent_dir, ws)
+            (agent_dir / ".evaluated").write_text("1")
+            if critique:
+                # FAIL → 멤버 재spawn (critique을 instruction으로 전달)
+                self._log(f"  🔍 Evaluator FAIL → {agent_id} 재spawn (1 cycle)")
+                append_message(
+                    agent_dir / "mailbox.md",
+                    from_="lead", to=agent_id, kind="instruction",
+                    body=f"# Evaluator critique\n{critique}\n\n위 문제를 해결하고 다시 [STATUS:DONE]을 보고하라.",
+                )
+                self.timeline.emit("lead", "verify_fail", agent_id=agent_id,
+                                   detail=f"evaluator: {critique[:140]}")
+                self.registry.update(agent_id, status="RUNNING")
+                brief = self._briefs.get(agent_id) or self._reconstruct_brief(agent_id)
+                if brief:
+                    rec = self.registry.get(agent_id)
+                    next_n = (rec.last_resume if rec else 0) + 1
+                    self.registry.update(agent_id, last_resume=next_n)
+                    self._submit_spawn(brief, resume_count=next_n)
+                return True
+
+        # merge
+        merge_report = self.merger.merge(ws, agent_id)
+        self.timeline.emit(
+            "lead", "merge", agent_id=agent_id,
+            copied=len(merge_report.copied), conflicts=len(merge_report.conflicts),
+        )
+
+        # plan.md에서 해당 goal 체크
+        goals = parse_plan(self.plan_md)
+        for g in goals:
+            if g.assigned == agent_id and not g.done:
+                g.done = True
+        render_plan(self.plan_md, "Plan", goals)
+
+        # 머지 완료 마커
+        (agent_dir / ".merged").write_text(merge_report.summary())
+        return True
+
+    def _already_merged(self, agent_id: str) -> bool:
+        return (self.agents_root / agent_id / ".merged").exists()
+
+    def _has_unverified_done(self) -> bool:
+        """budget 한도 후에도 verify+merge 처리해야 할 멤버 있나? graceful drain용."""
+        for rec in self.registry.by_status("DONE"):
+            if not self._already_merged(rec.agent_id):
+                return True
+        return False
+
+    # ---------- code janitor 자율 호출 ----------
+
+    def _should_run_code_janitor(self) -> bool:
+        """lead가 ws/main 상태 보고 청소 필요 판단."""
+        if not self.ws_main.exists():
+            return False
+        py_files = list(self.ws_main.rglob("*.py"))
+        if len(py_files) < 5:
+            return False  # 너무 작아서 청소 의미 없음
+        # 가벼운 LLM 판단 (haiku) — ws/main 파일 목록 보고 결정
+        sample = "\n".join(f"- {p.relative_to(self.ws_main)}" for p in py_files[:30])
+        system = (
+            "너는 팀장의 정리 보조다. 워크스페이스 .py 파일 목록을 보고 "
+            "지금 미사용 코드 정리(code-janitor)를 돌릴 시점인지 yes/no 판정. "
+            "JSON 한 줄만 출력."
+        )
+        user = (
+            f"# ws/main의 .py 파일 ({len(py_files)}개)\n{sample}\n\n"
+            "# 출력 (정확히 JSON)\n"
+            '{"run": true|false, "reason": "한 줄"}\n\n'
+            "run=true 기준: 파일 ≥10, 명백히 미완성/temp/old 이름 다수, 진입점 외 잡파일. "
+            "run=false: 깔끔, 변동 중, 또는 판단 어려움."
+        )
+        try:
+            from core.llm import parse_json_loose
+            data = parse_json_loose(self.llm.call(system, user, tier="haiku"))
+            decision = bool(data.get("run"))
+            self._log(f"  🧹 code-janitor 판단: run={decision} ({data.get('reason', '?')[:60]})")
+            return decision
+        except Exception as e:
+            self._log(f"  ⚠ janitor 판단 실패, skip: {e}")
+            return False
+
+    def _run_code_janitor(self) -> None:
+        from agents.janitor import CodeJanitor
+        try:
+            janitor = CodeJanitor(
+                self.ws_main,
+                entrypoints=[],  # ws/main 산출물은 진입점 정의 없으니 빈 리스트
+                dry_run=False,
+            )
+            report = janitor.run()
+            self._log(f"  🧹 {report.summary()}")
+            self.timeline.emit(
+                "lead", "code_janitor",
+                archived=len(report.archived), kept=len(report.kept),
+                archive_dir=str(report.archive_dir) if report.archive_dir else "",
+            )
+        except Exception as e:
+            self._log(f"  ⚠ code-janitor 실패: {e}")
+            self.timeline.emit("lead", "error", error=f"code-janitor: {e}")
+
+    def _run_evaluator(self, agent_id: str, agent_dir: Path, ws: Path) -> Optional[str]:
+        """AdversarialVerifier 1회 호출. FAIL이면 critique 문자열 반환, 아니면 None."""
+        try:
+            from agents.audit import AdversarialVerifier
+        except Exception as e:
+            self._log(f"  ⚠ Evaluator import 실패: {e}")
+            return None
+        delivery = agent_dir / "delivery.md"
+        artifacts = delivery.read_text(encoding="utf-8") if delivery.exists() else ""
+        # ws 산출물 요약 (파일 목록 + 크기)
+        ws_summary = []
+        for p in sorted(ws.rglob("*")):
+            if p.is_file():
+                try:
+                    ws_summary.append(f"- {p.relative_to(ws)} ({p.stat().st_size}B)")
+                except OSError:
+                    pass
+                if len(ws_summary) >= 30:
+                    break
+        artifacts_summary = artifacts + "\n\n## Files\n" + "\n".join(ws_summary)
+        av = AdversarialVerifier(self.lead_state_dir, self.llm)
+        try:
+            report = av.review(
+                task_id=agent_id,
+                task_title=f"agent {agent_id}",
+                spec_excerpt=self.spec[:2000],
+                artifacts_summary=artifacts_summary[:3000],
+                verifier_log="",
+            )
+        except Exception as e:
+            self._log(f"  ⚠ Evaluator 호출 실패 (무시): {e}")
+            return None
+        if not report.has_fail():
+            return None
+        return "\n".join(
+            f"[{j.persona}] {j.evidence}" for j in report.judgements
+            if j.verdict == "FAIL"
+        )
+
+    # ---------- 유틸 ----------
+
+    def _registry_summary(self) -> str:
+        recs = self.registry.all()
+        counts: dict[str, int] = {}
+        for r in recs:
+            counts[r.status] = counts.get(r.status, 0) + 1
+        return json.dumps(counts)
+
+    def _log(self, msg: str) -> None:
+        print(msg, flush=True)
+        log_path = self.lead_state_dir / "lead.log"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")

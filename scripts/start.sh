@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# 자율 에이전트 시스템 시작 스크립트
+#
+# 사용법:
+#   ./scripts/start.sh <spec.md> [추가 옵션]
+#
+# 예:
+#   ./scripts/start.sh requirements.md --max-hours 24
+#
+# 스크립트는 백그라운드 실행 후 PID 파일에 저장하고 로그를 tail.
+# Ctrl-C로 tail 종료 → 시스템은 계속 실행 (nohup 효과).
+# 정지: ./scripts/stop.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+ROOT_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
+cd "$ROOT_DIR"
+
+if [ $# -lt 1 ]; then
+    echo "사용법: $0 <spec.md> [추가 옵션]"
+    echo ""
+    echo "예: $0 requirements.md --max-hours 24 --max-turns 2000"
+    exit 1
+fi
+
+SPEC="$1"
+shift
+
+if [ ! -f "$SPEC" ]; then
+    echo "❌ spec 파일 없음: $SPEC"
+    exit 1
+fi
+
+# 환경 검증
+echo "환경 검증..."
+if ! command -v claude >/dev/null 2>&1; then
+    echo "❌ claude CLI 미설치"
+    echo "   설치: npm install -g @anthropic-ai/claude-code"
+    exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "❌ python3 미설치"
+    exit 1
+fi
+
+# 디렉토리 준비
+WORKSPACE="${WORKSPACE:-./workspace}"
+CHECKPOINT="${CHECKPOINT:-./state}"
+LOG_DIR="${LOG_DIR:-./logs}"
+mkdir -p "$WORKSPACE" "$CHECKPOINT" "$LOG_DIR"
+
+LOG_FILE="$LOG_DIR/run-$(date +%Y%m%d-%H%M%S).log"
+PID_FILE="$LOG_DIR/orchestrator.pid"
+
+# 이미 실행 중인지
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "❌ 이미 실행 중 (PID $(cat "$PID_FILE")). 정지하려면 ./scripts/stop.sh"
+    exit 1
+fi
+
+echo "🚀 시작"
+echo "  spec:       $SPEC"
+echo "  workspace:  $WORKSPACE"
+echo "  checkpoint: $CHECKPOINT"
+echo "  log:        $LOG_FILE"
+echo ""
+
+# nohup으로 백그라운드 실행
+nohup python3 -u -m lead.main \
+    --spec "$SPEC" \
+    --workspace "$WORKSPACE" \
+    --checkpoint "$CHECKPOINT" \
+    "$@" \
+    > "$LOG_FILE" 2>&1 &
+
+PID=$!
+echo "$PID" > "$PID_FILE"
+echo "✅ PID $PID 백그라운드 실행"
+echo ""
+echo "Ctrl-C 하면 tail만 종료, 시스템은 계속 실행됨"
+echo "정지하려면: ./scripts/stop.sh"
+echo "================================================================"
+
+# 로그 tail (tail이 종료해도 시스템은 안 죽음)
+tail -f "$LOG_FILE"

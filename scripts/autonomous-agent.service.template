@@ -1,0 +1,51 @@
+# Systemd unit 템플릿
+#
+# 사용법:
+#   1. 이 파일을 복사: sudo cp scripts/autonomous-agent.service.template /etc/systemd/system/autonomous-agent.service
+#   2. 아래 PLACEHOLDER 들을 실제 값으로 변경
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable autonomous-agent
+#   5. sudo systemctl start autonomous-agent
+#   6. 로그: journalctl -u autonomous-agent -f
+#
+# 주의:
+# - User에 claude login한 사용자 지정 (그 사용자 홈의 ~/.claude/ 사용)
+# - 시스템 부팅 시 자동 시작이지만, 작업 다 끝나면 정상 종료 (Restart=on-failure)
+# - 사람 결정 대기로 종료(코드 5)는 재시작하지 않음 — 운영자가 결정 채운 후 수동 재시작
+
+[Unit]
+Description=Autonomous Recursive Agent System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=PLACEHOLDER_USER
+WorkingDirectory=PLACEHOLDER_INSTALL_DIR
+Environment="HOME=/home/PLACEHOLDER_USER"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/home/PLACEHOLDER_USER/.npm-global/bin"
+
+ExecStart=/usr/bin/python3 -u orchestrator/main.py \
+    --spec PLACEHOLDER_SPEC_PATH \
+    --workspace PLACEHOLDER_WORKSPACE \
+    --checkpoint PLACEHOLDER_CHECKPOINT \
+    --max-hours 24 \
+    --max-turns 2000
+
+# 실패 시 재시작 (rate limit, 일시적 네트워크 등)
+# 단, 종료 코드 5(사람 결정 필요)나 0(완료)이면 재시작 안 함
+Restart=on-failure
+RestartSec=300
+RestartPreventExitStatus=0 5
+
+# 리소스 제한
+MemoryMax=4G
+CPUQuota=200%
+
+# 로깅
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autonomous-agent
+
+[Install]
+WantedBy=multi-user.target
