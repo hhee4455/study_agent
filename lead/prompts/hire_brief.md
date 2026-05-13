@@ -26,10 +26,17 @@
     {{"name":"...", "kind":"shell", "command":"...", "timeout_sec":60}}
   ],
   "system_prompt": "이 팀원의 페르소나/접근 방침 (markdown 문단)",
-  "allowed_tools": ["Read","Write","Edit","Bash"],
+  "allowed_tools": ["Read","Write","Edit","Bash","WebSearch","WebFetch","Grep","Glob"],
   "verify": false
 }}
 ```
+
+# `allowed_tools` 가이드
+기본값(권장): `["Read","Write","Edit","Bash","WebSearch","WebFetch","Grep","Glob"]`
+- 코드/문서 작성 멤버는 기본값 그대로.
+- 외부 자료 조회가 명백히 불필요한 단순 파일 변환 작업은 web 빼고 `["Read","Write","Edit","Bash"]`로 좁혀도 됨.
+- 검색만 필요하고 임의 URL 가져오기 불필요하면 `WebFetch` 제외 가능.
+- 빈 배열은 금지 (도구 없으면 멤버가 일 못 함).
 
 # `verify` 필드 (Evaluator 토글) — 신중히 결정
 이 멤버의 산출물에 AdversarialVerifier (3-페르소나 회의주의 critique) 1 cycle을

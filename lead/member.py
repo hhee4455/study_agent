@@ -157,13 +157,16 @@ class MemberSpawner:
         sp_path = agent_dir / "system_prompt.md"
         sp_path.write_text(brief.system_prompt, encoding="utf-8")
 
-        config = SessionConfig(
+        # allowed_tools 명시 안 됐으면 SessionConfig 기본값 사용 (web+grep+glob 포함).
+        config_kwargs = dict(
             model=self.default_model,
             max_turns=max_turns,
             timeout_sec=timeout_sec,
-            allowed_tools=brief.allowed_tools or ["Read", "Write", "Edit", "Bash"],
             system_prompt_path=sp_path,
         )
+        if brief.allowed_tools:
+            config_kwargs["allowed_tools"] = brief.allowed_tools
+        config = SessionConfig(**config_kwargs)
 
         driver = render(
             "driver",

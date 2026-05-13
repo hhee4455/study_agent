@@ -49,8 +49,8 @@ study_agent/
 │   ├── verifier.py          # shell/file_exists/file_contains 객관 검증
 │   ├── rate_limit.py        # exponential backoff
 │   ├── health.py            # 디스크/메모리 헬스체크
-│   ├── cli_caller.py        # claude CLI 호출 stream-json 파서
-│   └── incidents.py         # 구조화 이벤트 로그
+│   ├── cli_caller.py        # claude / codex CLI 호출 wrapper
+│   └── path_guard.py        # 경로 escape 차단 (P5 결정)
 │
 ├── lead/                    # 팀장 시스템 (진입점)
 │   ├── main.py              # python -m lead.main

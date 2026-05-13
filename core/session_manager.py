@@ -20,7 +20,15 @@ class SessionConfig:
     model: str = "opus"  # claude CLI alias (LLMClient와 통일)
     max_turns: int = 30
     timeout_sec: int = 1800
-    allowed_tools: list[str] = field(default_factory=lambda: ["Read", "Write", "Edit", "Bash"])
+    # 기본 toolset:
+    # - Read/Write/Edit/Bash: 파일/명령 작업
+    # - WebSearch/WebFetch: 인터넷 자료 수집 (라이브러리 문서, API 스펙, 시세 등)
+    # - Grep/Glob: ws 내부 탐색 (Bash로 가능하지만 명시적으로 빠름)
+    allowed_tools: list[str] = field(default_factory=lambda: [
+        "Read", "Write", "Edit", "Bash",
+        "WebSearch", "WebFetch",
+        "Grep", "Glob",
+    ])
     system_prompt_path: Optional[Path] = None
 
 
@@ -133,9 +141,6 @@ class SessionManager:
         stderr_content = proc.stderr.read() if proc.stderr else ""
         if stderr_content:
             (log_dir / "stderr.txt").write_text(stderr_content)
-
-        # Keep output.txt for backwards compatibility (verifier reads plain text).
-        (log_dir / "output.txt").write_text(final_text)
 
         success = proc.returncode == 0 and not result_error
         return SessionResult(
