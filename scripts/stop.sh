@@ -7,11 +7,13 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOT_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 cd "$ROOT_DIR"
 
-LOG_DIR="${LOG_DIR:-./logs}"
-PID_FILE="$LOG_DIR/orchestrator.pid"
+# start.sh 와 동일 default — CHECKPOINT 아래 logs/.
+CHECKPOINT="${CHECKPOINT:-../workspace/state}"
+LOG_DIR="${LOG_DIR:-$CHECKPOINT/logs}"
+PID_FILE="$LOG_DIR/lead.pid"
 
 if [ ! -f "$PID_FILE" ]; then
-    echo "PID 파일 없음 — 실행 중이 아닐 수 있음"
+    echo "PID 파일 없음 ($PID_FILE) — 실행 중이 아닐 수 있음"
     exit 0
 fi
 

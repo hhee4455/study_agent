@@ -145,7 +145,7 @@ def scan_new(
 ) -> list[Message]:
     """모든 에이전트 mailbox.md를 훑어 last_seen 이후의 메시지 반환.
 
-    `agents_root`: meta/state/agents/ 디렉토리
+    `agents_root`: <state_dir>/agents/ 디렉토리
     `last_seen`: {agent_id: last_msg_id_processed}
     """
     out: list[Message] = []

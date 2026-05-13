@@ -1,8 +1,8 @@
-"""lead/main.py — 새 팀장 시스템 진입점.
+"""lead/main.py — 팀장 시스템 진입점.
 
-  python -m lead.main --spec requirements.md --workspace ws/main --checkpoint meta/state
+  python -m lead.main --spec requirements.md --workspace ws/main --checkpoint <state_dir>
 
-종료 코드는 legacy/main.py와 호환:
+종료 코드:
   0   완료
   3   진행 가능 작업 없음 (정체)
   4   budget 또는 rate limit 한도
@@ -37,7 +37,7 @@ EXIT_INTERRUPT = 130
 
 
 def _preflight(skip: bool) -> None:
-    """claude CLI 설치 + 로그인 확인. legacy/main.py와 같은 패턴."""
+    """claude CLI 설치 + 로그인 확인."""
     if skip:
         return
     import shutil, subprocess
@@ -66,7 +66,7 @@ def parse_args():
     )
     p.add_argument("--spec", required=True, help="요구서 .md")
     p.add_argument("--workspace", required=True, help="메인 워크스페이스 (ws/main)")
-    p.add_argument("--checkpoint", required=True, help="상태 디렉토리 (meta/state)")
+    p.add_argument("--checkpoint", required=True, help="상태 디렉토리 (<state_dir>)")
     p.add_argument("--max-hours", type=float, default=12.0)
     p.add_argument("--max-cost-usd", type=float, default=float("inf"))
     p.add_argument("--max-turns", type=int, default=2000)
@@ -97,11 +97,13 @@ def main() -> int:
 
     state_dir = Path(args.checkpoint).resolve()
     ws_main = Path(args.workspace).resolve()
-    ws_root = ws_main.parent if ws_main.name == "main" else ws_main.parent / "ws"
-    if not (ws_main.parent.name == "ws"):
-        # ws_root를 별도 폴더로
-        ws_root = state_dir / "ws"
-        ws_main = ws_root / "main"
+    ws_root = ws_main.parent
+    if ws_main.name != "main":
+        print(
+            f"⚠️  --workspace 의 마지막 컴포넌트는 'main' 권장 (실제: {ws_main.name!r}). "
+            f"머지 자체는 동작하지만 seed_files 복사 (ws_root/main 경로 가정)가 깨질 수 있음.",
+            file=sys.stderr,
+        )
 
     lead_state_dir = state_dir / "lead"
     agents_root = state_dir / "agents"
@@ -134,6 +136,7 @@ def main() -> int:
     lead = TeamLead(
         spec=spec,
         spec_name=spec_name,
+        state_dir=state_dir,
         lead_state_dir=lead_state_dir,
         agents_root=agents_root,
         session_logs_root=session_logs_root,

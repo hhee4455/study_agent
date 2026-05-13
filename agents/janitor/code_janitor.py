@@ -74,7 +74,7 @@ class CodeJanitor:
         """
         workspace: 정리 대상 루트 (예: ws/main)
         protected_files: 항상 보호할 파일 basename
-        entrypoints: rel path로 명시한 진입점 (예: ["lead/main.py", "legacy/main.py"])
+        entrypoints: rel path로 명시한 진입점 (예: ["lead/main.py"])
         dry_run: True면 archive 안 하고 보고만
         """
         self.workspace = workspace.resolve()

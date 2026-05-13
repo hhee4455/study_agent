@@ -263,6 +263,7 @@ def _make_team_lead(d: Path, llm, *, enable_evaluator: bool = False):
     return TeamLead(
         spec="hello.txt 만들고 한 줄 내용 쓰기",
         spec_name="spec.md",
+        state_dir=state,
         lead_state_dir=lead_dir,
         agents_root=agents,
         session_logs_root=sessions,
@@ -423,6 +424,7 @@ def test_team_lead_parallel_hiring():
         )
         lead = TeamLead(
             spec="3개 파일 만들기", spec_name="spec.md",
+            state_dir=state,
             lead_state_dir=state/"lead", agents_root=state/"agents",
             session_logs_root=state/"session_logs", ws_root=ws_root,
             ws_main=ws_root/"main", llm=llm, budget=budget,

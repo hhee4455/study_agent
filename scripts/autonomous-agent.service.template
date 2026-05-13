@@ -25,7 +25,7 @@ WorkingDirectory=PLACEHOLDER_INSTALL_DIR
 Environment="HOME=/home/PLACEHOLDER_USER"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin:/home/PLACEHOLDER_USER/.npm-global/bin"
 
-ExecStart=/usr/bin/python3 -u orchestrator/main.py \
+ExecStart=/usr/bin/python3 -u -m lead.main \
     --spec PLACEHOLDER_SPEC_PATH \
     --workspace PLACEHOLDER_WORKSPACE \
     --checkpoint PLACEHOLDER_CHECKPOINT \

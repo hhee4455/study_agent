@@ -90,9 +90,10 @@ class TeamLead:
         self,
         spec: str,
         spec_name: str,
-        lead_state_dir: Path,        # meta/state/lead/
-        agents_root: Path,            # meta/state/agents/
-        session_logs_root: Path,      # meta/state/session_logs/
+        state_dir: Path,              # <state_dir>/ — session_logs/ 위치 결정
+        lead_state_dir: Path,         # <state_dir>/lead/
+        agents_root: Path,            # <state_dir>/agents/
+        session_logs_root: Path,      # <state_dir>/session_logs/
         ws_root: Path,                # ws/
         ws_main: Path,                # ws/main/ (= args.workspace)
         llm: LLMClient,
@@ -104,6 +105,7 @@ class TeamLead:
     ):
         self.spec = spec
         self.spec_name = spec_name
+        self.state_dir = state_dir
         self.lead_state_dir = lead_state_dir
         self.agents_root = agents_root
         self.session_logs_root = session_logs_root
@@ -122,7 +124,7 @@ class TeamLead:
 
         self.plan_md = lead_state_dir / "plan.md"
         self.registry = AgentRegistry(lead_state_dir, agents_root)
-        self.spawner = MemberSpawner(agents_root, ws_root, lead_state_dir.parent, default_model=default_model)
+        self.spawner = MemberSpawner(agents_root, ws_root, state_dir, default_model=default_model)
         self.merger = WorkspaceMerger(ws_main, lead_state_dir / "conflicts")
         self.timeline = TimelineRenderer(lead_state_dir, agents_root, session_logs_root)
 

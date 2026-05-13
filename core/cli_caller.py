@@ -1,7 +1,6 @@
-"""claude CLI 호출 래퍼. orchestrator/main.py에서 lead/main.py와 공유하려고 분리.
+"""claude / codex CLI 호출 래퍼. lead/main.py 의 LLMClient 가 사용.
 
-동작 변화 없음 — main.py에 있던 _build_cli_command / _stream_call / make_raw_llm_factory를
-그대로 옮긴 모듈.
+build_cli_command / stream_call / make_raw_llm_factory 와 codex 변형을 한 모듈에 모음.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """AgentRegistry — agents.json 인덱스.
 
-meta/state/lead/agents.json이 source of truth는 아님 — meta/state/agents/{agent_id}/
+<state_dir>/lead/agents.json이 source of truth는 아님 — <state_dir>/agents/{agent_id}/
 디렉토리가 진짜 상태고, agents.json은 빠른 조회용 인덱스. 시작 시 disk scan으로
 rehydrate 가능.
 
@@ -37,8 +37,8 @@ def _now_iso() -> str:
 class AgentRegistry:
     def __init__(self, lead_state_dir: Path, agents_root: Path):
         """
-        lead_state_dir: meta/state/lead/ — agents.json 저장 위치
-        agents_root: meta/state/agents/ — 에이전트별 디렉토리 root
+        lead_state_dir: <state_dir>/lead/ — agents.json 저장 위치
+        agents_root: <state_dir>/agents/ — 에이전트별 디렉토리 root
         """
         self.lead_state_dir = lead_state_dir
         self.agents_root = agents_root

@@ -1,11 +1,11 @@
 """TimelineRenderer — 사람 친화 timeline.md 생성.
 
 raw 데이터 (보존):
-  - meta/state/lead/events.jsonl   ← 팀장이 emit() 호출로 직접 기록 (hire, reply, verify, merge)
-  - meta/state/agents/{id}/mailbox.md ← 메일박스 메시지
-  - meta/state/session_logs/{task_id}/stream.jsonl ← claude -p NDJSON stream
+  - <state_dir>/lead/events.jsonl   ← 팀장이 emit() 호출로 직접 기록 (hire, reply, verify, merge)
+  - <state_dir>/agents/{id}/mailbox.md ← 메일박스 메시지
+  - <state_dir>/session_logs/{task_id}/stream.jsonl ← claude -p NDJSON stream
 
-렌더링 (사람용): meta/state/lead/timeline.md
+렌더링 (사람용): <state_dir>/lead/timeline.md
   - 모든 이벤트를 timestamp 순 정렬
   - 한 줄당 한 이벤트 (grep/scroll 친화)
 
@@ -40,9 +40,9 @@ def _truncate(text: str, n: int = 200) -> str:
 class TimelineRenderer:
     def __init__(self, lead_state_dir: Path, agents_root: Path, session_logs_root: Path):
         """
-        lead_state_dir: meta/state/lead/
-        agents_root: meta/state/agents/
-        session_logs_root: meta/state/session_logs/
+        lead_state_dir: <state_dir>/lead/
+        agents_root: <state_dir>/agents/
+        session_logs_root: <state_dir>/session_logs/
         """
         self.lead_state_dir = lead_state_dir
         self.agents_root = agents_root

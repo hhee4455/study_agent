@@ -17,12 +17,8 @@ venv/
 *.swp
 .DS_Store
 
-# 런타임 상태 — meta/는 spec(requirements.md)만 트래킹, 나머지는 제외
-meta/state/
-meta/ws/
-meta/logs/
-
 # 라이브/스모크 출력
+# 주의: 실 작업(state/ws/logs)은 ../workspace/ 아래라 이 리포 트래킹과 무관
 *.out
 *.pid
 *.bak1

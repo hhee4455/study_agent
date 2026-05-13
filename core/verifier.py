@@ -117,7 +117,7 @@ class Check:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Check":
-        """tasks.json의 dict 표현에서 생성. 알 수 없는 키는 무시."""
+        """brief 의 verification_checks dict 표현에서 생성. 알 수 없는 키는 무시."""
         valid = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in d.items() if k in valid})
 

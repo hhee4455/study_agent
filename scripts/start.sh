@@ -45,14 +45,15 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-# 디렉토리 준비
-WORKSPACE="${WORKSPACE:-./workspace}"
-CHECKPOINT="${CHECKPOINT:-./state}"
-LOG_DIR="${LOG_DIR:-./logs}"
+# 디렉토리 기본값 — agent_system/ 옆 workspace/ 가정 (옵션 A 구조)
+# LOG_DIR 은 CHECKPOINT 아래에 두어 stop.sh / status.sh 가 별도 인자 없이 같은 위치를 본다.
+WORKSPACE="${WORKSPACE:-../workspace/ws/main}"
+CHECKPOINT="${CHECKPOINT:-../workspace/state}"
+LOG_DIR="${LOG_DIR:-$CHECKPOINT/logs}"
 mkdir -p "$WORKSPACE" "$CHECKPOINT" "$LOG_DIR"
 
 LOG_FILE="$LOG_DIR/run-$(date +%Y%m%d-%H%M%S).log"
-PID_FILE="$LOG_DIR/orchestrator.pid"
+PID_FILE="$LOG_DIR/lead.pid"
 
 # 이미 실행 중인지
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then

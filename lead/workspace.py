@@ -7,7 +7,7 @@
   4. 양쪽 수정 (conflict):
      - main 파일 유지
      - 멤버 파일은 main/{path}.from-{agent_id}로 보존
-     - meta/state/lead/conflicts/{agent_id}-{ts}.md에 충돌 기록
+     - <state_dir>/lead/conflicts/{agent_id}-{ts}.md에 충돌 기록
 
 자동 3-way 머지 안 함. 충돌 발생 시 팀장이 다음 tick에서 처리.
 """
@@ -73,7 +73,7 @@ class WorkspaceMerger:
     def __init__(self, main_ws: Path, conflicts_dir: Path):
         """
         main_ws: ws/main/ (또는 args.workspace)
-        conflicts_dir: meta/state/lead/conflicts/
+        conflicts_dir: <state_dir>/lead/conflicts/
         """
         self.main_ws = main_ws
         self.conflicts_dir = conflicts_dir

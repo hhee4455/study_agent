@@ -4,26 +4,39 @@
 
 **환경 가정**: Claude Code CLI (`claude login` 완료) + Claude Max 구독 가정. macOS / Linux.
 
+## 디렉토리 구조 (옵션 A — 시스템과 작업물 완전 분리)
+
+```
+sentinel-deepactive/
+├── agent_system/         # ★ 자가 검증/성장 시스템 (이 리포)
+│   ├── core/ lead/ agents/  # 코드
+│   ├── tests/ scripts/
+│   ├── decisions/        # 시스템 진화 토론 결과 (p4/p5 등)
+│   └── README.md
+└── workspace/            # ★ 실 작업물 (별도 git 가능)
+    ├── requirements.md   # 입력 spec
+    ├── state/            # 런타임 (lead 로그, agents.json, ...)
+    └── ws/main/          # 멤버 산출물 통합 결과
+```
+
 ## 30초 빠른 시작
 
 ```bash
 # 1. 의존성 확인
-claude --version
-claude -p "ping"
+claude --version && claude -p "ping"
 
-# 2. 요구서 작성 (이미 meta/requirements.md 있으면 그거 사용)
-cat > meta/requirements.md <<'EOF'
+# 2. 요구서 작성 (workspace/requirements.md)
+cat > ../workspace/requirements.md <<'EOF'
 # 내 프로젝트
 - hello.txt에 "안녕 세상" 한 줄
 - README.md 한 단락
 EOF
 
-# 3. 백그라운드 실행 (산출물은 meta/ws/main, 상태는 meta/state)
-WORKSPACE=./meta/ws/main CHECKPOINT=./meta/state \
-  ./scripts/start.sh meta/requirements.md --max-hours 0.5
+# 3. 백그라운드 실행 (agent_system/ 안에서)
+./scripts/start.sh ../workspace/requirements.md --max-hours 0.5
 
 # 4. 사람 친화 로그 실시간 보기 (다른 터미널)
-tail -f ./meta/state/lead/timeline.md
+tail -f ../workspace/state/lead/timeline.md
 
 # 5. 정지
 ./scripts/stop.sh
@@ -36,12 +49,12 @@ tail -f ./meta/state/lead/timeline.md
 3. **격리 spawn**: 각 팀원은 자기 `ws/{agent_id}/`에서 `claude -p` 서브프로세스로 동작. 메인 워크스페이스 못 건드림.
 4. **메일박스 통신**: 팀원이 작업 중 결정 필요하면 `mailbox.md`에 `kind=question` 메시지 append + `[STATUS:WAITING]` 출력 → 즉시 세션 종료. 다음 사이클에 팀장이 LLM으로 답변 작성 → 멤버 재spawn (같은 cwd, 새 task_id).
 5. **검증/머지**: 팀원이 `[STATUS:DONE]`로 종료 → `Verifier.run()` 통과 → (옵션) AdversarialVerifier 1회 critique → `ws/{agent_id}/` → `ws/main/` 머지. 충돌은 `<path>.from-{agent_id}`로 보존, 자동 머지 안 함.
-6. **사람 친화 로그**: `meta/state/lead/timeline.md`가 모든 이벤트(채용/spawn/질문/답변/머지)를 한 줄씩 사람 읽기 좋게 렌더.
+6. **사람 친화 로그**: `workspace/state/lead/timeline.md`가 모든 이벤트(채용/spawn/질문/답변/머지)를 한 줄씩 사람 읽기 좋게 렌더.
 
-## 폴더 구조
+## 모듈 구성 (agent_system/ 내부)
 
 ```
-study_agent/
+agent_system/
 ├── core/                    # 인프라 (모든 에이전트가 의존)
 │   ├── budget.py            # 시간/턴 한도
 │   ├── llm.py               # 모델 티어링 LLM 클라이언트
@@ -60,7 +73,6 @@ study_agent/
 │   ├── registry.py          # agents.json 인덱스 + 디스크 rehydrate
 │   ├── workspace.py         # ws 머지 + 충돌 보고
 │   ├── timeline.py          # 사람 친화 timeline.md 렌더러
-│   ├── tools.py             # 옵션 도구 wrapper (debate/evaluator/janitor)
 │   └── prompts/             # 외부화된 LLM 프롬프트
 │       ├── plan_initial.md  # spec → plan 분해
 │       ├── hire_brief.md    # 팀원 채용 brief JSON
@@ -72,10 +84,12 @@ study_agent/
 │   ├── audit/adversarial.py # Adversarial Evaluator (per-hire 토글, P4 결정)
 │   └── janitor/code_janitor.py # 사용 안 하는 .py를 .archive/로 이동 (lead 자율 호출)
 │
-├── meta/                    # 런타임 상태 (gitignore 추천)
+├── decisions/               # 시스템 진화 토론 결과 (p4/p5 등 영구 기록)
 ├── scripts/                 # start.sh / stop.sh / status.sh
-└── tests/test_lead.py       # 23개 테스트 (단위/integration/path_guard/sanity)
+└── tests/test_lead.py       # 24개 테스트 (단위/integration/path_guard/sanity)
 ```
+
+런타임 상태(`workspace/state/`, `workspace/ws/`)는 위 트리 밖, 부모 디렉토리의 형제 위치에 생성됨 — 30초 빠른 시작의 트리 참조.
 
 ## 빅테크 패턴 매핑
 
@@ -117,7 +131,7 @@ python -m lead.main \
 
 ```bash
 python3 tests/test_lead.py
-# 15/15 passed (단위 12 + integration 3)
+# 24/24 passed (mailbox/registry/workspace/timeline/team_lead/verifier/path_guard/code_janitor)
 ```
 
 Integration test는 stub LLM + stub spawner로 전체 cycle 검증:

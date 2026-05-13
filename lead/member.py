@@ -65,9 +65,9 @@ class MemberSpawner:
         default_model: str = "opus",
     ):
         """
-        agents_root: meta/state/agents/
+        agents_root: <state_dir>/agents/
         ws_root: ws/ (각 멤버는 ws/{agent_id}/)
-        state_dir: meta/state/ (session_logs 저장용)
+        state_dir: <state_dir>/ (session_logs 저장용)
         """
         self.agents_root = agents_root
         self.ws_root = ws_root
