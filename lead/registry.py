@@ -28,6 +28,8 @@ class AgentRecord:
     completed_at: str = ""
     last_resume: int = 0  # 재spawn 횟수 (task_id 충돌 방지용)
     last_error: str = ""
+    cost_usd: float = 0.0           # 누적 LLM 비용 — 멤버별 가시화
+    last_session_id: str = ""       # claude CLI session id (재spawn 시 --resume 후속용)
 
 
 def _now_iso() -> str:

@@ -39,6 +39,7 @@ SKIP_FILE_GLOBS = (
     "*.pyc", "*.pyo", "*.pyd",
     ".DS_Store",
     "*.egg-info",  # 디렉토리 + 파일 둘 다
+    ".coverage", ".coverage.*",  # pytest-cov 바이너리 — main 에 머지하면 안 됨
 )
 
 
@@ -47,6 +48,14 @@ def _should_skip(entry: Path) -> bool:
     if entry.is_dir():
         return name in SKIP_DIRS or any(fnmatch.fnmatch(name, g) for g in SKIP_FILE_GLOBS)
     return any(fnmatch.fnmatch(name, g) for g in SKIP_FILE_GLOBS)
+
+
+def _is_binary(path: Path, sample: int = 8192) -> bool:
+    """파일 앞부분에 null byte 있으면 바이너리 — 토론/통합 불가능."""
+    try:
+        return b"\0" in path.read_bytes()[:sample]
+    except OSError:
+        return True
 
 
 @dataclass
@@ -132,6 +141,11 @@ class WorkspaceMerger:
             # 파일 양쪽 존재 — 비교
             if filecmp.cmp(entry, target, shallow=False):
                 report.skipped_same.append(str(rel))
+                continue
+
+            # 바이너리는 토론 불가 — main 유지, 멤버 변경 폐기, conflict 가 아닌 skip 으로 기록
+            if _is_binary(entry) or _is_binary(target):
+                report.skipped_pattern.append(str(rel) + " (binary)")
                 continue
 
             # 다름 → 충돌

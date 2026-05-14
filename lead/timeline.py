@@ -61,7 +61,29 @@ class TimelineRenderer:
 
     # ---- 렌더링 ----
 
+    def _needs_rerender(self) -> bool:
+        """timeline.md 보다 새로운 입력이 있을 때만 full rebuild. idle tick 시 I/O 절약."""
+        if not self.timeline_path.exists():
+            return True
+        threshold = self.timeline_path.stat().st_mtime
+        if self.events_path.exists() and self.events_path.stat().st_mtime > threshold:
+            return True
+        for root in (self.agents_root, self.session_logs_root):
+            if not root.exists():
+                continue
+            for d in root.iterdir():
+                if not d.is_dir():
+                    continue
+                # mailbox.md 또는 stream.jsonl 둘 중 어느 것이라도
+                for name in ("mailbox.md", "stream.jsonl"):
+                    f = d / name
+                    if f.exists() and f.stat().st_mtime > threshold:
+                        return True
+        return False
+
     def render(self) -> Path:
+        if not self._needs_rerender():
+            return self.timeline_path
         entries: list[TimelineEntry] = []
         entries.extend(self._from_events())
         entries.extend(self._from_mailboxes())

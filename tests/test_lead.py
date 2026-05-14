@@ -706,6 +706,163 @@ def test_code_janitor_skips_recent_files():
         assert "fresh_orphan.py" not in rep.archived
 
 
+# ---------- 새 기능 회귀 테스트 (2026-05-14) ----------
+
+def test_workspace_binary_conflict_skipped_not_debated():
+    """바이너리 파일 충돌은 conflicts 가 아니라 skipped_pattern 으로 분류 (debate 안 함)."""
+    from lead.workspace import WorkspaceMerger
+    with tempfile.TemporaryDirectory() as d:
+        main = Path(d) / "main"
+        member = Path(d) / "M001"
+        conflicts = Path(d) / "conflicts"
+        main.mkdir()
+        # 양쪽 다 다른 바이너리 (null byte 포함)
+        (main / "data.bin").write_bytes(b"AAA\x00BBB")
+        member.mkdir()
+        (member / "data.bin").write_bytes(b"XXX\x00YYY")
+        # 대조군: 텍스트 conflict 는 정상 detect
+        (main / "text.txt").write_text("a")
+        (member / "text.txt").write_text("b")
+
+        merger = WorkspaceMerger(main, conflicts)
+        rep = merger.merge(member, "M001")
+        # binary 는 skipped_pattern 에 (binary) 표기
+        assert any("data.bin" in s and "binary" in s for s in rep.skipped_pattern), rep.skipped_pattern
+        assert "data.bin" not in rep.conflicts
+        # text 는 conflict 정상
+        assert "text.txt" in rep.conflicts
+
+
+def test_team_lead_recovers_zombies_with_delivery():
+    """이전 run zombie: RUNNING + delivery.md 큼 → DONE 으로 승격."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM([])  # 호출 안 됨
+        lead = _make_team_lead(Path(d), llm)
+        # zombie 만들기: register + status RUNNING + delivery 큰 글
+        agent_dir = lead.agents_root / "M999"
+        agent_dir.mkdir(parents=True)
+        lead.registry.register("M999", goal_id="G-x")
+        lead.registry.set_status("M999", "RUNNING")
+        (agent_dir / "delivery.md").write_text("x" * 500)
+
+        lead._recover_zombies()
+        assert lead.registry.get("M999").status == "DONE"
+
+
+def test_team_lead_recovers_zombies_without_delivery_unassigns():
+    """zombie: RUNNING + delivery 비어있음 → FAILED + plan 에서 unassign."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM([])
+        lead = _make_team_lead(Path(d), llm)
+        # plan.md 미리 작성 (zombie 가 assigned)
+        lead.plan_md.parent.mkdir(parents=True, exist_ok=True)
+        lead.plan_md.write_text(
+            "# Plan\n- [ ] G-001-x: do x (assigned: M999)\n"
+        )
+        agent_dir = lead.agents_root / "M999"
+        agent_dir.mkdir(parents=True)
+        lead.registry.register("M999", goal_id="G-001-x")
+        lead.registry.set_status("M999", "RUNNING")
+        (agent_dir / "delivery.md").write_text("")  # 비어있음
+
+        lead._recover_zombies()
+        assert lead.registry.get("M999").status == "FAILED"
+        # plan 에서 unassign 됐는지
+        text = lead.plan_md.read_text()
+        assert "(assigned:" not in text
+
+
+def test_team_lead_failed_member_unassigns_plan():
+    """spawn FAILED → registry FAILED + plan 에서 unassign 자동."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM([
+            "# Plan\n- [ ] G-001-x: do x",
+            '{"mission":"X","deliverables":["x"],'
+            '"verification_checks":[],"system_prompt":"X","allowed_tools":["Write"]}',
+        ])
+        lead = _make_team_lead(Path(d), llm)
+        _stub_spawner(lead, [{"status": "FAILED", "error": "boom"}])
+        lead.run()
+        # M001 FAILED + plan 에서 assigned 제거됐는지
+        assert lead.registry.get("M001").status == "FAILED"
+        text = lead.plan_md.read_text()
+        assert "(assigned:" not in text
+
+
+def test_team_lead_ws_main_summary_lists_files():
+    """ws_main_tree 가 ws/main 의 .py 파일을 상대경로로 나열."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM([])
+        lead = _make_team_lead(Path(d), llm)
+        (lead.ws_main / "src" / "vix_trader").mkdir(parents=True)
+        (lead.ws_main / "src" / "vix_trader" / "config.py").write_text("x=1")
+        (lead.ws_main / "tests").mkdir(parents=True)
+        (lead.ws_main / "tests" / "test_x.py").write_text("def test(): pass")
+        summary = lead._ws_main_summary()
+        assert "src/vix_trader/config.py" in summary
+        assert "tests/test_x.py" in summary
+
+
+def test_timeline_skips_rerender_when_no_input_changed():
+    """idle tick 시 timeline.md mtime 이 입력 mtime 보다 새로우면 rebuild skip."""
+    with tempfile.TemporaryDirectory() as d:
+        lead = Path(d) / "lead"
+        agents = Path(d) / "agents"
+        sessions = Path(d) / "session_logs"
+        tr = TimelineRenderer(lead, agents, sessions)
+        tr.emit("lead", "hire", agent_id="M001", goal="x")
+        first = tr.render()
+        first_mtime = first.stat().st_mtime
+        time.sleep(0.05)
+        # 입력 변화 없음 → 같은 render 호출이 파일을 안 건드려야 함
+        tr.render()
+        assert first.stat().st_mtime == first_mtime, "재렌더 안 일어나야 함"
+        # 새 이벤트 → 재렌더 일어남
+        time.sleep(0.05)
+        tr.emit("lead", "verify_pass", agent_id="M001", checks=1)
+        tr.render()
+        assert first.stat().st_mtime > first_mtime, "재렌더 일어나야 함"
+
+
+def test_high_stakes_fallback_returns_true_for_debate_bias():
+    """판정 LLM 실패 시 fallback 은 True (토론 쪽) — 사용자 정책: 애매하면 토론."""
+    class _BrokenLLM:
+        def call(self, *a, **kw):
+            raise RuntimeError("simulated llm failure")
+    with tempfile.TemporaryDirectory() as d:
+        lead = _make_team_lead(Path(d), _BrokenLLM())
+        result = lead._is_high_stakes_question("뭔가 복잡한 질문?")
+        assert result is True, "LLM 실패 시 토론으로 fallback 해야 함"
+
+
+def test_high_stakes_prompt_biases_toward_debate():
+    """prompt 가 'high_stakes=true' default 명시 + 단순 lookup 만 false 라고 안내."""
+    from lead.team_lead import TeamLead
+    # _is_high_stakes_question 내부 system/user 문자열에 정책 키워드가 있는지 직접 검사
+    import inspect
+    src = inspect.getsource(TeamLead._is_high_stakes_question)
+    # 핵심 정책 어구
+    assert "기본은 high_stakes=true" in src
+    assert "애매하면" in src and "토론" in src
+    assert "단순 lookup" in src or "단일 정답" in src
+
+
+def test_agent_record_has_cost_and_session_id():
+    """SpawnResult / AgentRecord 가 cost + session_id 누적할 수 있는지."""
+    with tempfile.TemporaryDirectory() as d:
+        lead_dir = Path(d) / "lead"
+        agents = Path(d) / "agents"
+        reg = AgentRegistry(lead_dir, agents)
+        reg.register("M001", goal_id="G-x")
+        reg.update("M001", cost_usd=0.5, last_session_id="abc-123")
+        rec = reg.get("M001")
+        assert rec.cost_usd == 0.5
+        assert rec.last_session_id == "abc-123"
+        # 누적 시뮬레이션
+        reg.update("M001", cost_usd=rec.cost_usd + 0.7)
+        assert reg.get("M001").cost_usd == 1.2
+
+
 # ---------- 실행 ----------
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ if ! kill -0 "$PID" 2>/dev/null; then
     exit 0
 fi
 
-echo "PID $PID에 SIGTERM 전송..."
+echo "PID ${PID}에 SIGTERM 전송..."
 kill "$PID"
 
 # 최대 30초 대기

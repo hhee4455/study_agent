@@ -37,6 +37,8 @@ class SessionResult:
     success: bool
     output: str = ""
     error: str = ""
+    session_id: str = ""        # claude CLI 의 result 이벤트 session_id (재spawn --resume 후속용)
+    cost_usd: float = 0.0       # 이 spawn 의 total_cost_usd (멤버별 누적용)
 
 
 class SessionManager:
@@ -113,6 +115,8 @@ class SessionManager:
 
         final_text = ""
         result_error = ""
+        session_id = ""
+        cost_usd = 0.0
         try:
             with (log_dir / "stream.jsonl").open("w", encoding="utf-8") as stream_f:
                 assert proc.stdout is not None
@@ -131,12 +135,17 @@ class SessionManager:
                             result_error = evt.get("result") or evt.get("error") or "session error"
                         else:
                             final_text = evt.get("result", "") or ""
+                        session_id = evt.get("session_id", "") or session_id
+                        cost_usd = float(evt.get("total_cost_usd", 0.0) or 0.0)
             proc.wait()
         finally:
             timer.cancel()
 
         if timed_out["v"]:
-            return SessionResult(success=False, error=f"세션 타임아웃 ({config.timeout_sec}s)")
+            return SessionResult(
+                success=False, error=f"세션 타임아웃 ({config.timeout_sec}s)",
+                session_id=session_id, cost_usd=cost_usd,
+            )
 
         stderr_content = proc.stderr.read() if proc.stderr else ""
         if stderr_content:
@@ -147,4 +156,6 @@ class SessionManager:
             success=success,
             output=final_text,
             error=result_error or (stderr_content if not success else ""),
+            session_id=session_id,
+            cost_usd=cost_usd,
         )

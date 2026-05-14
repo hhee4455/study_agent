@@ -145,6 +145,9 @@ class TeamLead:
         self._log(f"팀장 시작 | spec={self.spec_name} | max_parallel={self.max_parallel}")
         self._log("=" * 60)
 
+        # 이전 run 이 죽어 zombie 가 된 RUNNING 멤버 복구 (delivery 있으면 DONE 으로, 없으면 FAILED + plan 에서 unassign)
+        self._recover_zombies()
+
         if not self.plan_md.exists():
             self._initial_plan()
 
@@ -251,6 +254,62 @@ class TeamLead:
 
         return progressed
 
+    # ---------- 좀비 복구 / plan 동기화 ----------
+
+    def _recover_zombies(self) -> None:
+        """startup 시 RUNNING 표기인데 spawn future 없는 멤버 = 이전 run 좀비.
+
+        delivery.md 가 충분히 차있으면 → DONE 으로 승격 (verify+merge 경로 태움)
+        delivery.md 비어있으면 → FAILED + plan 에서 unassign (다음 tick 에 재hire)
+        """
+        running = self.registry.by_status("RUNNING")
+        if not running:
+            return
+        for rec in running:
+            delivery = self.agents_root / rec.agent_id / "delivery.md"
+            size = delivery.stat().st_size if delivery.exists() else 0
+            if size >= 200:
+                self.registry.set_status(rec.agent_id, "DONE")
+                self._log(f"  🔄 좀비 복구: {rec.agent_id} RUNNING → DONE (delivery {size}B)")
+                self.timeline.emit("lead", "zombie_recovered",
+                                   agent_id=rec.agent_id, to="DONE", delivery_bytes=size)
+            else:
+                self.registry.update(rec.agent_id, status="FAILED",
+                                     last_error="이전 run zombie (delivery 비어있음)")
+                self._unassign_from_plan(rec.agent_id)
+                self._log(f"  🔄 좀비 복구: {rec.agent_id} RUNNING → FAILED + plan unassign")
+                self.timeline.emit("lead", "zombie_recovered",
+                                   agent_id=rec.agent_id, to="FAILED", delivery_bytes=size)
+
+    def _unassign_from_plan(self, agent_id: str) -> None:
+        """plan.md 의 goals 중 이 agent 에게 assigned 된 미완료 goal 의 assigned 를 비움."""
+        if not self.plan_md.exists():
+            return
+        goals = parse_plan(self.plan_md)
+        changed = False
+        for g in goals:
+            if g.assigned == agent_id and not g.done:
+                g.assigned = ""
+                changed = True
+        if changed:
+            render_plan(self.plan_md, "Plan", goals)
+
+    def _ws_main_summary(self, max_files: int = 30) -> str:
+        """hire_brief 컨텍스트로 ws/main 현 .py 파일 목록 (상위 N개). 새 멤버가 기존 import 경로 일관성 유지하도록."""
+        if not self.ws_main.exists():
+            return "(비어있음)"
+        files: list[str] = []
+        for p in sorted(self.ws_main.rglob("*.py")):
+            parts = p.relative_to(self.ws_main).parts
+            if "__pycache__" in parts or ".venv" in parts or ".archive" in parts:
+                continue
+            files.append(str(p.relative_to(self.ws_main)))
+            if len(files) >= max_files:
+                break
+        if not files:
+            return "(.py 파일 없음)"
+        return "\n".join(f"- {f}" for f in files)
+
     # ---------- LLM 결정 ----------
 
     def _initial_plan(self) -> None:
@@ -327,6 +386,7 @@ class TeamLead:
             spec=self.spec[:3000],
             goal_id=goal.id,
             goal_title=goal.title,
+            ws_main_tree=self._ws_main_summary(),
         )
         try:
             from core.llm import parse_json_loose
@@ -375,17 +435,28 @@ class TeamLead:
         return self._resume_member(agent_id)
 
     def _is_high_stakes_question(self, question_body: str) -> bool:
-        """LLM(haiku)에게 짧게 판단 시킴. 보안/아키텍처/논쟁적 trade-off면 True."""
+        """LLM(haiku)에게 짧게 판단. 정책: 기본 = 토론, 단순 lookup 만 단독 답변.
+
+        애매하면 토론 쪽으로 (belief entrenchment 완화 + 다관점 검토 비용 < 잘못된 결정 비용).
+        호출자: _handle_waiting — 멤버가 [STATUS:WAITING] + question 보고했을 때.
+        """
         system = (
-            "너는 팀장의 분류 보조다. 팀원의 질문이 단순 yes/no/방향 답변으로 충분한지, "
-            "아니면 여러 관점이 필요한 결정인지 판정. JSON 한 줄만 출력."
+            "너는 팀장의 분류 보조다. 팀원 질문이 (a) 단일 정답이 있는 단순 lookup 인지 "
+            "(b) 여러 관점·trade-off 가 얽힌 결정인지 판정. 애매하면 (b) 로 분류해 "
+            "토론으로 다관점 검토. JSON 한 줄만 출력."
         )
         user = (
             f"# 질문\n{question_body[:1500]}\n\n"
             "# 출력 (정확히 JSON)\n"
             '{"high_stakes": true|false, "reason": "한 줄"}\n\n'
-            "high_stakes=true 기준: 보안/안전, 아키텍처 갈래, 비가역 변경, 비용 큰 trade-off, "
-            "정책 결정. 단순 사실/구현 디테일/방향 확인은 false."
+            "**기본은 high_stakes=true** (토론 소집). false 는 아래 조건 *모두* 만족할 때만:\n"
+            "  - 단일 정답이 있는 단순 사실/문서/스펙 인용 질문\n"
+            "  - yes/no 한 단어로 답할 수 있는 명확한 방향 확인\n"
+            "  - 한 줄 답변으로 충분하고 trade-off 가 전혀 없는 디테일\n\n"
+            "**high_stakes=true 로 가는 예** (조금이라도 복잡하면 전부):\n"
+            "  설계 선택, 라이브러리/패턴 선정, 테스트 전략, 인터페이스 변경, "
+            "성능 vs 안전 trade-off, spec 모호함 해석, 우선순위, 에러 처리 방침, "
+            "데이터 모델 결정, 명명 컨벤션 선택, 외부 의존성 선택 등."
         )
         try:
             from core.llm import parse_json_loose
@@ -393,8 +464,9 @@ class TeamLead:
             data = parse_json_loose(raw)
             return bool(data.get("high_stakes"))
         except Exception as e:
-            self._log(f"  ⚠️ high-stakes 판정 실패, 단순 답변으로 fallback: {e}")
-            return False
+            # 판정 실패 시 사용자 정책에 맞게 토론 쪽으로 fallback (안전한 쪽)
+            self._log(f"  ⚠️ high-stakes 판정 실패, 토론으로 fallback: {e}")
+            return True
 
     def _convene_debate_for_question(
         self, agent_id: str, question: Message, all_msgs: list[Message]
@@ -547,6 +619,17 @@ class TeamLead:
                 time.sleep(0.5)
 
     def _post_spawn(self, agent_id: str, result: SpawnResult, brief: HireBrief) -> None:
+        # 누적 비용 + 마지막 session_id 기록 (status 와 무관하게 매 spawn 마다)
+        if result.cost_usd or result.session_id:
+            rec = self.registry.get(agent_id)
+            updates: dict = {}
+            if result.cost_usd:
+                updates["cost_usd"] = (rec.cost_usd if rec else 0.0) + result.cost_usd
+            if result.session_id:
+                updates["last_session_id"] = result.session_id
+            if updates:
+                self.registry.update(agent_id, **updates)
+
         if result.status == "DONE":
             self.registry.set_status(agent_id, "DONE")
         elif result.status == "WAITING":
@@ -554,6 +637,7 @@ class TeamLead:
         elif result.status == "FAILED":
             self.registry.update(agent_id, status="FAILED",
                                  last_error=result.error[:300])
+            self._unassign_from_plan(agent_id)  # FAILED 즉시 plan 동기화 — 다음 tick 에 재hire 가능
             self.timeline.emit("lead", "fire", agent_id=agent_id,
                                reason=f"멤버가 FAILED 보고: {result.error[:140]}")
         else:

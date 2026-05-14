@@ -22,6 +22,21 @@
 - **모든 deliverable 완료**: `{delivery}` 에 산출물 요약 작성 → `{mailbox}` 에 `kind=delivery` append → 마지막 줄에 정확히 `[STATUS:DONE]`.
 - **회복 불가 실패**: 사유를 `{mailbox}` 에 `kind=status` 로 적고 → 마지막 줄에 정확히 `[STATUS:FAILED]`.
 
+## 언제 질문해야 하나 (적극적으로 묻기)
+혼자 결정 가능: 단일 정답·관습·spec 이 명확히 답을 정해주는 사항.
+**질문해야 하는 경우** (조금이라도 trade-off / 선택지가 있으면 묻기):
+- 라이브러리 / 패턴 / 데이터 모델 선택 — 후보 2개 이상이고 우열이 명확하지 않음
+- 인터페이스 / 시그니처 변경 — 다른 모듈이 영향 받음
+- 에러 처리 방침 / 재시도 정책 / 타임아웃 값 — spec 에 명시 없음
+- 명명 컨벤션 — 기존 코드에 선례 없음
+- spec 의 모호한 문장 해석 — 두 가지 이상으로 읽힘
+- 외부 의존성 추가 — `pyproject.toml` 의존성에 새 패키지
+
+질문은 **option A vs option B (vs C)** 형식으로 구체화하고, 너의 선호와 trade-off 분석을 함께 첨부.
+팀장은 단순 질문은 직접, 복잡한 질문은 4-way 토론으로 결정해 답한다.
+
+너의 시간보다 잘못된 결정의 복구 비용이 훨씬 크다. 망설여지면 묻기.
+
 ## 메시지 형식 (mailbox에 직접 쓸 때)
 ```
 <!-- MSG id=<auto> from={agent_id} to=lead kind=<question|status|delivery> ts=<utc-iso> -->

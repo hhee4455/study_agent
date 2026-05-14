@@ -33,6 +33,8 @@ class SpawnResult:
     last_question: Optional[Message] = None
     delivery_text: str = ""
     error: str = ""
+    session_id: str = ""
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -201,6 +203,8 @@ class MemberSpawner:
             last_question=last_q,
             delivery_text=delivery_text,
             error=result.error,
+            session_id=result.session_id,
+            cost_usd=result.cost_usd,
         )
 
     def _latest_question(self, agent_id: str) -> Optional[Message]:
