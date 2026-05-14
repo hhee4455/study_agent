@@ -49,6 +49,11 @@ NO_PROGRESS_CAP = 10
 # code-janitor 자율 판단 주기 (이만큼 hire 횟수마다 한 번 판단).
 JANITOR_CHECK_EVERY_HIRES = 10
 
+# 최종 점검 (pytest) 반복 한도 — 합격 못 하면 사람 결정 요청.
+FINAL_VERIFICATION_MAX_ITERATIONS = 5
+# pytest 실행 타임아웃 (초)
+FINAL_VERIFICATION_TIMEOUT_SEC = 900
+
 
 @dataclass
 class Goal:
@@ -94,8 +99,8 @@ class TeamLead:
         lead_state_dir: Path,         # <state_dir>/lead/
         agents_root: Path,            # <state_dir>/agents/
         session_logs_root: Path,      # <state_dir>/session_logs/
-        ws_root: Path,                # ws/
-        ws_main: Path,                # ws/main/ (= args.workspace)
+        ws_root: Path,                # ws/members/ — 멤버 격리 ws 들의 부모
+        ws_main: Path,                # ws/main/ (= args.workspace) — 머지 결과
         llm: LLMClient,
         budget: BudgetManager,
         health: Optional[HealthMonitor] = None,
@@ -136,6 +141,8 @@ class TeamLead:
         self._briefs: dict[str, HireBrief] = {}
         # janitor 판단 카운터 (hire 횟수 누적)
         self._hires_since_janitor = 0
+        # 최종 점검 (pytest) 반복 카운터 — 한도 도달하면 사람 결정 코드 (5) 반환
+        self._final_verification_count = 0
 
     # ---------- 진입점 ----------
 
@@ -176,9 +183,37 @@ class TeamLead:
 
                     goals = parse_plan(self.plan_md)
                     if goals and all(g.done for g in goals) and not self._pending:
-                        self._log("\n🎉 모든 goal 완료")
-                        self.timeline.render()
-                        return 0
+                        # 모든 goal 완료 → 팀장 최종 점검 (pytest 전체 실행)
+                        passed, output = self._final_verification()
+                        if passed:
+                            self._log("\n🎉 최종 점검 통과 — 모든 goal 완료")
+                            self.timeline.emit("lead", "final_verification_pass")
+                            self.timeline.render()
+                            return 0
+                        # 실패 — 한도 검사 후 fix goal 자동 추가
+                        self._final_verification_count += 1
+                        if self._final_verification_count >= FINAL_VERIFICATION_MAX_ITERATIONS:
+                            self._log(
+                                f"\n⚠️ 최종 점검 {self._final_verification_count}회 실패 — 사람 결정 필요"
+                            )
+                            self.timeline.emit(
+                                "lead", "final_verification_exhausted",
+                                iterations=self._final_verification_count,
+                            )
+                            self.timeline.render()
+                            return 5
+                        added = self._add_fix_goals_from_failures(output)
+                        self._log(
+                            f"\n🔁 최종 점검 {self._final_verification_count}회 — "
+                            f"실패 분석 → fix goal {added}개 추가, 재진행"
+                        )
+                        self.timeline.emit(
+                            "lead", "final_verification_fail",
+                            iterations=self._final_verification_count, added_goals=added,
+                        )
+                        # 진행률 리셋 — 새 goal 들이 hire 될 시간 줌
+                        consecutive_no_progress = 0
+                        continue  # 다음 tick — 새 goal hire 진행
 
                     if not progressed:
                         consecutive_no_progress += 1
@@ -253,6 +288,101 @@ class TeamLead:
                 progressed = True
 
         return progressed
+
+    # ---------- 최종 점검 (pytest) 게이트 ----------
+
+    def _final_verification(self) -> tuple[bool, str]:
+        """ws/main 에서 pytest 전체 실행. (passed, output) 반환.
+
+        venv 가 있으면 그쪽 python 사용, 없으면 시스템 python3.
+        timeout 도달 시 (False, 'timeout') 반환.
+        """
+        import subprocess
+        self._log("=" * 60)
+        self._log(f"🔍 팀장 최종 점검 — pytest 전체 실행 (반복 #{self._final_verification_count + 1})")
+        self._log("=" * 60)
+
+        venv_py = self.ws_main / ".venv" / "bin" / "python"
+        py_cmd = [str(venv_py)] if venv_py.exists() else ["python3"]
+        cmd = py_cmd + ["-m", "pytest", "--tb=short", "-q", "--no-header"]
+
+        try:
+            result = subprocess.run(
+                cmd, cwd=self.ws_main,
+                capture_output=True, text=True,
+                timeout=FINAL_VERIFICATION_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"pytest timeout after {FINAL_VERIFICATION_TIMEOUT_SEC}s"
+        except FileNotFoundError as e:
+            return False, f"pytest 실행 불가: {e} — venv/의존성 설치 필요"
+
+        # pytest exit codes: 0=all pass, 1=fail, 5=no tests collected.
+        # 5 (no tests) 는 "검증할 게 없음" → 통과로 취급 (early-stage / non-Python 프로젝트).
+        passed = result.returncode in (0, 5)
+        # 출력 너무 크면 끝부분만 (실패 정보가 끝에 모임)
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        if len(output) > 8000:
+            output = "... (앞부분 생략) ...\n" + output[-8000:]
+        self._log(f"  pytest exit={result.returncode}  {'PASS' if passed else 'FAIL'}")
+        return passed, output
+
+    def _add_fix_goals_from_failures(self, pytest_output: str) -> int:
+        """pytest 실패 출력 분석 → 새 plan goal 추가. 추가된 개수 반환.
+
+        LLM (opus) 가 실패 로그 보고 수정 작업을 sub-goal 단위로 분해.
+        """
+        system = (
+            "너는 팀장이다. pytest 실패 로그를 보고 어떤 수정 작업이 필요한지 정리해 "
+            "각 수정을 별개 sub-goal 로 JSON 배열로 출력. JSON 외 텍스트 금지."
+        )
+        user = (
+            f"# pytest 실패 출력\n```\n{pytest_output}\n```\n\n"
+            "# 출력 (정확히 JSON 배열 하나)\n"
+            '[{"id": "G-FIX-NNN-slug", "title": "수정 작업 1-2문장 설명"}, ...]\n\n'
+            "규칙:\n"
+            "- 각 goal 은 한 명의 멤버가 한 사이클에 끝낼 수 있는 단위.\n"
+            "- 여러 테스트가 동일 원인이면 1 goal 로 묶기.\n"
+            "- id 는 `G-FIX-001-...` 형식, 기존 plan 의 id 와 안 겹치게.\n"
+            "- 실패가 없거나 분석 불가하면 빈 배열 `[]` 반환."
+        )
+        try:
+            raw = self.llm.call(system, user, tier="opus")
+        except Exception as e:
+            self._log(f"  ⚠ 실패 분석 LLM 실패: {e}")
+            return 0
+
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not m:
+            self._log(f"  ⚠ LLM 응답에 JSON 배열 없음")
+            return 0
+        try:
+            new_goals = json.loads(m.group(0))
+        except json.JSONDecodeError as e:
+            self._log(f"  ⚠ JSON 파싱 실패: {e}")
+            return 0
+        if not isinstance(new_goals, list):
+            return 0
+
+        # plan.md 에 추가 (id 중복 방지)
+        goals = parse_plan(self.plan_md)
+        existing_ids = {g.id for g in goals}
+        added = 0
+        for ng in new_goals:
+            if not isinstance(ng, dict):
+                continue
+            gid = str(ng.get("id", "")).strip()
+            title = str(ng.get("title", "")).strip()
+            if not gid or not title or gid in existing_ids:
+                continue
+            goals.append(Goal(id=gid, title=title, done=False, assigned=""))
+            existing_ids.add(gid)
+            added += 1
+        if added:
+            render_plan(self.plan_md, "Plan", goals)
+            self.timeline.emit("lead", "plan_update",
+                               note=f"final verification 실패 → fix goal {added}개 추가")
+        return added
 
     # ---------- 좀비 복구 / plan 동기화 ----------
 

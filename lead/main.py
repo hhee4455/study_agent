@@ -97,11 +97,13 @@ def main() -> int:
 
     state_dir = Path(args.checkpoint).resolve()
     ws_main = Path(args.workspace).resolve()
-    ws_root = ws_main.parent
+    # ws_root 의미: 멤버 격리 ws 들의 부모. main 의 형제 디렉토리 `members/` 로 분리해
+    # ws/main vs ws/members/M0XX 구조 — 멤버 산출물이 main 과 한 단계 더 구별됨.
+    ws_root = ws_main.parent / "members"
     if ws_main.name != "main":
         print(
             f"⚠️  --workspace 의 마지막 컴포넌트는 'main' 권장 (실제: {ws_main.name!r}). "
-            f"머지 자체는 동작하지만 seed_files 복사 (ws_root/main 경로 가정)가 깨질 수 있음.",
+            f"머지 자체는 동작하지만 seed_files 복사 (ws_main 경로 가정)가 깨질 수 있음.",
             file=sys.stderr,
         )
 

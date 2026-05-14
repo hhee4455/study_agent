@@ -86,10 +86,11 @@ class MemberSpawner:
         ws = self.ws_root / brief.agent_id
         ws.mkdir(parents=True, exist_ok=True)
 
-        # seed files 복사 (있다면)
+        # seed files 복사 (있다면). ws_root = workspace/ws/members 이므로 main 은 부모의 형제.
         if brief.seed_files:
+            main_root = self.ws_root.parent / "main"
             for rel in brief.seed_files:
-                src = (self.ws_root / "main" / rel)
+                src = main_root / rel
                 if src.exists() and src.is_file():
                     dst = ws / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)

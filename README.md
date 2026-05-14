@@ -16,7 +16,9 @@ sentinel-deepactive/
 └── workspace/            # ★ 실 작업물 (별도 git 가능)
     ├── requirements.md   # 입력 spec
     ├── state/            # 런타임 (lead 로그, agents.json, ...)
-    └── ws/main/          # 멤버 산출물 통합 결과
+    └── ws/
+        ├── main/         # 멤버 산출물 통합 결과
+        └── members/      # 멤버별 격리 ws (M001, M002, ...)
 ```
 
 ## 30초 빠른 시작

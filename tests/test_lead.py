@@ -253,8 +253,8 @@ def _make_team_lead(d: Path, llm, *, enable_evaluator: bool = False):
     lead_dir = state / "lead"
     agents = state / "agents"
     sessions = state / "session_logs"
-    ws_root = d / "ws"
-    ws_main = ws_root / "main"
+    ws_main = d / "ws" / "main"
+    ws_root = d / "ws" / "members"  # 멤버들 부모. main 과 형제 디렉토리.
 
     budget = BudgetManager(
         BudgetLimits(max_hours=1.0, max_cost_usd=float("inf"), max_turns=1000),
@@ -417,7 +417,8 @@ def test_team_lead_parallel_hiring():
         from core.budget import BudgetLimits, BudgetManager
         from lead.team_lead import TeamLead
         state = Path(d) / "state"; state.mkdir()
-        ws_root = Path(d) / "ws"
+        ws_main = Path(d) / "ws" / "main"
+        ws_root = Path(d) / "ws" / "members"  # 멤버들 부모
         budget = BudgetManager(
             BudgetLimits(max_hours=1.0, max_cost_usd=float("inf"), max_turns=1000),
             state / "budget.json",
@@ -427,7 +428,7 @@ def test_team_lead_parallel_hiring():
             state_dir=state,
             lead_state_dir=state/"lead", agents_root=state/"agents",
             session_logs_root=state/"session_logs", ws_root=ws_root,
-            ws_main=ws_root/"main", llm=llm, budget=budget,
+            ws_main=ws_main, llm=llm, budget=budget,
             max_parallel=3,
         )
 
@@ -473,8 +474,8 @@ def test_team_lead_parallel_hiring():
         plan_text = (state/"lead"/"plan.md").read_text()
         assert plan_text.count("[x]") == 3
 
-        # 머지된 산출물 3개
-        main_files = sorted(p.name for p in (ws_root/"main").iterdir())
+        # 머지된 산출물 3개 (final verification 이 .pytest_cache 만들 수 있으니 dot-files 제외)
+        main_files = sorted(p.name for p in ws_main.iterdir() if not p.name.startswith("."))
         assert main_files == ["m001.txt", "m002.txt", "m003.txt"], main_files
 
 
@@ -694,6 +695,61 @@ def test_code_janitor_archives_unused_only():
         assert rep.archive_dir and (rep.archive_dir / "REPORT.md").exists()
 
 
+def test_code_janitor_archives_empty_placeholder_dir():
+    """trivial __init__.py 만 있고 외부 import 없는 디렉토리는 archive 된다 (infra/ 같은 경우)."""
+    from agents.janitor.code_janitor import CodeJanitor
+    with tempfile.TemporaryDirectory() as d:
+        ws = Path(d)
+        # 활성 코드
+        (ws / "pkg").mkdir()
+        (ws / "pkg" / "__init__.py").write_text("")
+        (ws / "pkg" / "core.py").write_text("def x(): return 1\n")
+        # 빈 placeholder 디렉토리 (외부 import 없음)
+        (ws / "pkg" / "infra").mkdir()
+        (ws / "pkg" / "infra" / "__init__.py").write_text("")
+        # 진입점 (`pkg.core.x` 사용)
+        (ws / "main.py").write_text("from pkg.core import x\nprint(x())\n")
+        # 모든 파일 mtime 을 과거로
+        old = time.time() - 30 * 86400
+        for p in ws.rglob("*"):
+            try: os.utime(p, (old, old))
+            except OSError: pass
+
+        rep = CodeJanitor(ws, entrypoints=["main.py"]).run()
+        # infra 가 빈 placeholder 로 인식돼서 archive
+        assert any("infra" in s for s in rep.archived_dead_dirs), \
+            f"기대: infra archive, 실제 archived_dead_dirs={rep.archived_dead_dirs}"
+        # pkg/ 자체는 archive 안 됨 (core.py 가 import 되니까 외부 사용 있음)
+        assert not any(s == "pkg" for s in rep.archived_dead_dirs)
+        # archive 디렉토리 내 REPORT 에 dead dir 언급
+        assert rep.archive_dir and (rep.archive_dir / "REPORT.md").exists()
+        report_text = (rep.archive_dir / "REPORT.md").read_text()
+        assert "infra" in report_text
+
+
+def test_code_janitor_keeps_dir_when_module_imported():
+    """trivial __init__.py 만 있어도 외부에서 그 모듈을 import 하면 keep."""
+    from agents.janitor.code_janitor import CodeJanitor
+    with tempfile.TemporaryDirectory() as d:
+        ws = Path(d)
+        (ws / "pkg").mkdir()
+        (ws / "pkg" / "__init__.py").write_text("")
+        # 빈 sub-package
+        (ws / "pkg" / "sub").mkdir()
+        (ws / "pkg" / "sub" / "__init__.py").write_text("")
+        # 다른 파일이 그 sub-package 를 import
+        (ws / "user.py").write_text("from pkg.sub import nothing  # noqa\n")
+        old = time.time() - 30 * 86400
+        for p in ws.rglob("*"):
+            try: os.utime(p, (old, old))
+            except OSError: pass
+
+        rep = CodeJanitor(ws, entrypoints=["user.py"]).run()
+        # sub 는 외부 import 있어서 archive 안 됨
+        assert not any("sub" in s for s in rep.archived_dead_dirs), \
+            f"keep 예상, 실제 archived={rep.archived_dead_dirs}"
+
+
 def test_code_janitor_skips_recent_files():
     from agents.janitor.code_janitor import CodeJanitor
     with tempfile.TemporaryDirectory() as d:
@@ -866,6 +922,59 @@ def test_spawn_default_max_turns_is_120():
     from lead.member import MemberSpawner
     sig = inspect.signature(MemberSpawner.spawn)
     assert sig.parameters["max_turns"].default == 120
+
+
+def test_final_verification_passes_when_pytest_returns_zero():
+    """ws/main 에 통과하는 더미 테스트 두면 _final_verification 이 True 반환."""
+    with tempfile.TemporaryDirectory() as d:
+        lead = _make_team_lead(Path(d), _FakeLLM([]))
+        (lead.ws_main / "tests").mkdir(parents=True)
+        (lead.ws_main / "tests" / "test_x.py").write_text("def test_ok(): assert 1 == 1\n")
+        passed, output = lead._final_verification()
+        assert passed is True, f"기대 pass, 실제 fail: {output[:300]}"
+
+
+def test_final_verification_fails_when_pytest_returns_nonzero():
+    """실패하는 테스트 있으면 _final_verification 이 False 반환."""
+    with tempfile.TemporaryDirectory() as d:
+        lead = _make_team_lead(Path(d), _FakeLLM([]))
+        (lead.ws_main / "tests").mkdir(parents=True)
+        (lead.ws_main / "tests" / "test_fail.py").write_text(
+            "def test_broken(): assert 1 == 2\n"
+        )
+        passed, output = lead._final_verification()
+        assert passed is False
+        assert "test_broken" in output or "FAIL" in output
+
+
+def test_add_fix_goals_from_failures_parses_llm_json():
+    """LLM 이 JSON 배열로 fix goal 들 반환하면 plan.md 에 추가."""
+    with tempfile.TemporaryDirectory() as d:
+        # LLM 응답: 2개 fix goal
+        llm = _FakeLLM([
+            '[{"id":"G-FIX-001-import","title":"import 누락 수정"},'
+            ' {"id":"G-FIX-002-typo","title":"typo 수정"}]'
+        ])
+        lead = _make_team_lead(Path(d), llm)
+        lead.plan_md.write_text("# Plan\n- [x] G-001-x: existing\n")
+        added = lead._add_fix_goals_from_failures("FAIL: test_foo")
+        assert added == 2
+        text = lead.plan_md.read_text()
+        assert "G-FIX-001-import" in text
+        assert "G-FIX-002-typo" in text
+        assert "G-001-x" in text  # 기존 보존
+
+
+def test_add_fix_goals_ignores_duplicate_ids():
+    """이미 plan 에 있는 id 는 추가 안 함."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM([
+            '[{"id":"G-001-x","title":"중복"},{"id":"G-FIX-001-new","title":"신규"}]'
+        ])
+        lead = _make_team_lead(Path(d), llm)
+        lead.plan_md.write_text("# Plan\n- [x] G-001-x: existing\n")
+        added = lead._add_fix_goals_from_failures("...")
+        assert added == 1  # G-FIX-001-new 만
 
 
 def test_high_stakes_fallback_returns_true_for_debate_bias():
