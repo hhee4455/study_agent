@@ -28,6 +28,15 @@ PERSONAS = [
      "다른 진영의 시각. claude 토론에 외부자로 합류. 합의 형성 압력 거부, "
      "셋이 놓친 측면 발굴.", "gpt-5.4-mini"),
 ]
+
+# 충돌 머지 통합 결정 같은 "두 버전 중 선택/통합 방향"용 단축 패널.
+# Skeptic(약점 찾기) + Outsider(외부 시각) 둘만, max_rounds=1 권장.
+# belief entrenchment 완화의 핵심(다른 백엔드 1명)은 보존. high-stakes 답변에는 쓰지 말 것.
+PERSONAS_FAST = [
+    ("Agent-B", "Skeptic", "가정에 의문 제기. 동조 압력 거부, 약점 찾기.", "sonnet"),
+    ("Agent-D", "Outsider",
+     "다른 진영의 시각. 합의 형성 압력 거부, 상대편이 놓친 측면 발굴.", "gpt-5.4-mini"),
+]
 COMPACT_THRESHOLD_BYTES = 8000
 
 
@@ -40,10 +49,17 @@ class DebateOutcome:
 
 
 class DebatePanel:
-    def __init__(self, debates_dir: Path, llm: LLMClient, max_rounds: int = 2):
+    def __init__(
+        self,
+        debates_dir: Path,
+        llm: LLMClient,
+        max_rounds: int = 2,
+        personas: Optional[list] = None,
+    ):
         self.debates_dir = debates_dir
         self.llm = llm
         self.max_rounds = max_rounds
+        self.personas = personas if personas is not None else PERSONAS
         debates_dir.mkdir(parents=True, exist_ok=True)
 
     def deliberate(
@@ -62,7 +78,7 @@ class DebatePanel:
 
         for round_num in range(1, self.max_rounds + 1):
             self._append(md_path, f"## Round {round_num}\n")
-            for handle, role, persona, model in PERSONAS:
+            for handle, role, persona, model in self.personas:
                 statement = self._speak(md_path, handle, role, persona, round_num, model)
                 self._append(md_path, f"\n[{handle} / {role}]\n{statement}\n")
 

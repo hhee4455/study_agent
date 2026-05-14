@@ -87,14 +87,21 @@ class MemberSpawner:
         ws.mkdir(parents=True, exist_ok=True)
 
         # seed files 복사 (있다면). ws_root = workspace/ws/members 이므로 main 은 부모의 형제.
+        # 원본 사본을 ws/{id}/.seed/ 에도 저장 — 머지 시 WorkspaceMerger 가 "멤버가 이 파일을
+        # 실제로 변경했는지" 판단하는 reference. 멤버가 안 건드린 파일은 머지 시 무시되어
+        # 다른 멤버의 동시 변경으로 인한 부수적 충돌이 자동으로 해소된다.
         if brief.seed_files:
             main_root = self.ws_root.parent / "main"
+            seed_root = ws / ".seed"
             for rel in brief.seed_files:
                 src = main_root / rel
                 if src.exists() and src.is_file():
                     dst = ws / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     dst.write_bytes(src.read_bytes())
+                    seed_dst = seed_root / rel
+                    seed_dst.parent.mkdir(parents=True, exist_ok=True)
+                    seed_dst.write_bytes(src.read_bytes())
 
         brief_path = agent_dir / "brief.md"
         checks_md = "\n".join(f"  - {c}" for c in brief.verification_checks) or "  - (없음)"

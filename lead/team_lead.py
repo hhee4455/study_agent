@@ -437,8 +437,9 @@ class TeamLead:
         if changed:
             render_plan(self.plan_md, "Plan", goals)
 
-    def _ws_main_summary(self, max_files: int = 30) -> str:
-        """hire_brief 컨텍스트로 ws/main 현 .py 파일 목록 (상위 N개). 새 멤버가 기존 import 경로 일관성 유지하도록."""
+    def _ws_main_summary(self, max_files: int = 60) -> str:
+        """plan_initial / hire_brief 컨텍스트로 ws/main 의 .py 파일 목록 (경로 + 라인 수).
+        라인 수가 있으면 decomposer 가 *큰 파일=수정 대상* / *작은 stub=신규 작성 여지* 를 판단하기 쉬워진다."""
         if not self.ws_main.exists():
             return "(비어있음)"
         files: list[str] = []
@@ -446,7 +447,12 @@ class TeamLead:
             parts = p.relative_to(self.ws_main).parts
             if "__pycache__" in parts or ".venv" in parts or ".archive" in parts:
                 continue
-            files.append(str(p.relative_to(self.ws_main)))
+            try:
+                with p.open("r", encoding="utf-8") as fh:
+                    lines = sum(1 for _ in fh)
+            except OSError:
+                lines = 0
+            files.append(f"{p.relative_to(self.ws_main)} ({lines}L)")
             if len(files) >= max_files:
                 break
         if not files:
@@ -456,7 +462,7 @@ class TeamLead:
     # ---------- LLM 결정 ----------
 
     def _initial_plan(self) -> None:
-        """spec → plan.md 초기 분해 (한 번만)."""
+        """spec → plan.md 초기 분해 (한 번만). 형식 위반 시 1회 strict 재시도."""
         self._log("🧭 plan.md 초기 분해")
         system, user = render_split(
             "plan_initial",
@@ -464,6 +470,16 @@ class TeamLead:
             spec=self.spec[:6000],
             ws_main_tree=self._ws_main_summary(),
         )
+
+        def _extract_and_write(raw_text: str) -> int:
+            """LLM 응답을 plan.md 에 저장하고 파싱된 goal 수 반환."""
+            m = re.search(r"```[a-zA-Z]*\s*\n(.*?)\n```", raw_text, re.DOTALL)
+            body = (m.group(1) if m else raw_text).strip()
+            if not body.lower().startswith("# plan"):
+                body = "# Plan\n" + body
+            self.plan_md.write_text(body + "\n", encoding="utf-8")
+            return len(parse_plan(self.plan_md))
+
         try:
             # 한 번만 호출되는 핵심 결정 — 모든 goal scope 가 여기서 결정됨. opus.
             raw = self.llm.call(system, user, tier="opus")
@@ -476,13 +492,33 @@ class TeamLead:
             self.timeline.emit("lead", "plan_update", note="fallback initial plan")
             return
 
-        # 코드 펜스 안의 내용만 추출
-        m = re.search(r"```[a-zA-Z]*\s*\n(.*?)\n```", raw, re.DOTALL)
-        body = (m.group(1) if m else raw).strip()
-        if not body.lower().startswith("# plan"):
-            body = "# Plan\n" + body
-        self.plan_md.write_text(body + "\n", encoding="utf-8")
-        self.timeline.emit("lead", "plan_update", note="초기 plan 작성됨")
+        n = _extract_and_write(raw)
+        if n == 0:
+            # LLM 이 형식을 어김 (서술 단락만, goal 라인 없음). strict 재시도 1회.
+            self._log("⚠️  초기 plan 출력에 goal 라인 0개 — strict 재시도")
+            strict_system = system + (
+                "\n\nABSOLUTE FORMAT: 응답 본문은 정확히 `# Plan` 한 줄로 시작하고, "
+                "그 뒤에 `- [ ] G-NNN-id: title` 형식의 goal 라인만 나열한다. "
+                "헤더/서술/요약/노트 일체 금지. 묶음 표기(G-001~003) 금지. "
+                "이 형식을 어기면 시스템이 plan 을 파싱하지 못해 작업이 즉시 중단된다."
+            )
+            try:
+                raw2 = self.llm.call(strict_system, user, tier="opus")
+                n = _extract_and_write(raw2)
+            except Exception as e:
+                self._log(f"⚠️  strict 재시도 실패: {e}")
+                n = 0
+            if n == 0:
+                self._log("❌ strict 재시도 후에도 goal 0개 — 안전 fallback 으로 1개 bootstrap goal 작성")
+                self.plan_md.write_text(
+                    "# Plan\n- [ ] G-001-bootstrap: 요구서를 읽고 첫 작업 결정 (LLM 형식 위반으로 자동 분해 실패)\n",
+                    encoding="utf-8",
+                )
+                self.timeline.emit("lead", "plan_update",
+                                   note="LLM 형식 위반 → fallback bootstrap goal")
+                return
+
+        self.timeline.emit("lead", "plan_update", note=f"초기 plan 작성됨 ({n} goals)")
 
     def _hire_next_unassigned(self) -> bool:
         goals = parse_plan(self.plan_md)
@@ -545,6 +581,23 @@ class TeamLead:
             data.setdefault("deliverables", [])
             data.setdefault("verification_checks", [])
             data.setdefault("system_prompt", "너는 능력 있는 엔지니어. 미션 완수 후 검증 기준 통과.")
+            # 자동 보완: deliverables 의 파일 경로가 ws_main 에 실재하면 seed_files 강제 포함.
+            # decomposer LLM 이 빠뜨려도 시드 누락 → 100% 충돌 패턴 방지.
+            seed = list(data.get("seed_files") or [])
+            seed_set = set(seed)
+            added: list[str] = []
+            for d in data["deliverables"]:
+                path = str(d).split("—")[0].split(" - ")[0].strip()
+                if not path or path in seed_set:
+                    continue
+                if (self.ws_main / path).is_file():
+                    seed.append(path)
+                    seed_set.add(path)
+                    added.append(path)
+            if added:
+                data["seed_files"] = seed
+                preview = ", ".join(added[:3]) + ("…" if len(added) > 3 else "")
+                self._log(f"  🔧 seed_files 자동 보완 +{len(added)} ({preview})")
             return data
         except Exception as e:
             self._log(f"  ⚠️ hire-brief LLM 실패: {e}")

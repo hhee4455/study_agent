@@ -34,6 +34,7 @@ SKIP_DIRS = {
     "dist", "build",
     ".cache",
     ".gradle", ".idea", ".vscode",
+    ".seed",  # 멤버 ws 의 시드 원본 사본 — main 에 옮기지 않음
 }
 SKIP_FILE_GLOBS = (
     "*.pyc", "*.pyo", "*.pyd",
@@ -94,6 +95,10 @@ class WorkspaceMerger:
         if not agent_ws.exists():
             return report
 
+        # 시드 사본 root — member.write_brief 가 만들어 둠. 없으면 멤버가 시드 안 받음
+        # (이전 사이클 멤버, 또는 seed_files 비어있던 hire). 그 경우 seed 비교는 skip 됨.
+        seed_root = agent_ws / ".seed"
+        self._seed_root = seed_root if seed_root.is_dir() else None
         self._walk(agent_ws, self.main_ws, agent_ws, report, agent_id)
 
         if report.conflicts:
@@ -142,6 +147,17 @@ class WorkspaceMerger:
             if filecmp.cmp(entry, target, shallow=False):
                 report.skipped_same.append(str(rel))
                 continue
+
+            # 멤버가 실제로 *이 파일을 변경했는지* 시드 사본과 대조.
+            # 시드 사본과 동일하면 = 멤버가 안 건드림. 그러면 main 의 현재 버전(다른 멤버가
+            # 머지로 갱신했을 수 있음)을 그대로 유지하고, 멤버 파일은 폐기 (clean fast-forward).
+            # 이게 없으면 동시 작업하던 다른 멤버가 main 을 변경한 직후 이 멤버가 머지할 때
+            # *멤버는 안 건드린* 파일까지 모조리 충돌로 잡혀 토론 비용이 폭증한다.
+            if self._seed_root is not None:
+                seed_copy = self._seed_root / rel
+                if seed_copy.is_file() and filecmp.cmp(entry, seed_copy, shallow=False):
+                    report.skipped_same.append(str(rel) + " (unchanged-from-seed)")
+                    continue
 
             # 바이너리는 토론 불가 — main 유지, 멤버 변경 폐기, conflict 가 아닌 skip 으로 기록
             if _is_binary(entry) or _is_binary(target):
