@@ -137,7 +137,7 @@ class MemberSpawner:
         *,
         resume_count: int = 0,
         timeout_sec: int = 1800,
-        max_turns: int = 60,
+        max_turns: int = 120,
     ) -> SpawnResult:
         """SessionManager로 멤버 세션 1회 실행. resume_count>0이면 task_id에 -rN 접미."""
         agent_id = brief.agent_id
@@ -187,8 +187,13 @@ class MemberSpawner:
             context_files=[brief_path, mailbox_path],
         )
 
-        # 상태 토큰 감지
-        status = detect_terminal_status(result.output) or "UNKNOWN"
+        # 상태 토큰 감지. 세션 자체가 error (max_turns / timeout / claude error) 면
+        # 토큰 유무와 무관하게 FAILED — UNKNOWN→WAITING fallback 으로 좀비 만들지 않기.
+        terminal = detect_terminal_status(result.output)
+        if not result.success and not terminal:
+            status = "FAILED"
+        else:
+            status = terminal or "UNKNOWN"
 
         # 마지막 question 감지 (멤버가 mailbox에 막 append 했을 수도)
         last_q = self._latest_question(agent_id)
@@ -196,13 +201,18 @@ class MemberSpawner:
         # delivery 텍스트
         delivery_text = delivery_path.read_text(encoding="utf-8") if delivery_path.exists() else ""
 
+        # error 가 비어있어도 session 자체가 실패면 명시적 사유 채워넣음
+        error_text = result.error
+        if status == "FAILED" and not error_text:
+            error_text = f"session error (success=False, no [STATUS:*] token, raw_output={result.output[:120]!r})"
+
         return SpawnResult(
             agent_id=agent_id,
             status=status,
             raw_output=result.output,
             last_question=last_q,
             delivery_text=delivery_text,
-            error=result.error,
+            error=error_text,
             session_id=result.session_id,
             cost_usd=result.cost_usd,
         )

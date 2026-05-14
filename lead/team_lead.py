@@ -319,7 +319,8 @@ class TeamLead:
             "plan_initial", spec_name=self.spec_name, spec=self.spec[:6000]
         )
         try:
-            raw = self.llm.call(system, user, tier="sonnet")
+            # 한 번만 호출되는 핵심 결정 — 모든 goal scope 가 여기서 결정됨. opus.
+            raw = self.llm.call(system, user, tier="opus")
         except Exception as e:
             self._log(f"⚠️  초기 plan LLM 실패, fallback: {e}")
             self.plan_md.write_text(
@@ -390,7 +391,8 @@ class TeamLead:
         )
         try:
             from core.llm import parse_json_loose
-            raw = self.llm.call(system, user, tier="sonnet")
+            # 멤버 mission/검증 정의 — 너무 좁으면 부족, 너무 넓으면 멤버 헤맴. opus.
+            raw = self.llm.call(system, user, tier="opus")
             data = parse_json_loose(raw)
             if not data or "mission" not in data:
                 return None
@@ -521,7 +523,8 @@ class TeamLead:
             q_body=question.body,
         )
         try:
-            return self.llm.call(system, user, tier="sonnet").strip()
+            # 멤버 다음 작업 방향 좌우 — high-stakes 가 아니어도 팀장 답변은 opus 로.
+            return self.llm.call(system, user, tier="opus").strip()
         except Exception as e:
             self.timeline.emit("lead", "error", error=f"reply LLM: {e}", agent_id=agent_id)
             return f"## Reply\n(자동 답변 실패: {e}) — 너의 판단으로 진행."

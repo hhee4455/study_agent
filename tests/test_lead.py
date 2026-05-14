@@ -824,6 +824,50 @@ def test_timeline_skips_rerender_when_no_input_changed():
         assert first.stat().st_mtime > first_mtime, "재렌더 일어나야 함"
 
 
+def test_spawn_error_without_token_marks_failed_not_waiting():
+    """SessionResult.success=False + [STATUS] 토큰 없음 → FAILED (mid-run 좀비 방지)."""
+    from lead.member import HireBrief, MemberSpawner
+    from core.session_manager import SessionResult
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        agents = d / "agents"
+        ws = d / "ws"
+        sp = MemberSpawner(agents, ws, d / "state", default_model="opus")
+        brief = HireBrief(
+            agent_id="M001", goal_id="G-x", mission="m",
+            deliverables=[], verification_checks=[],
+            system_prompt="p", allowed_tools=["Write"],
+        )
+        sp.write_brief(brief)
+
+        # SessionManager.run 을 monkey-patch — error 세션 시뮬레이션
+        class _FakeSM:
+            def __init__(self, *a, **kw): pass
+            def run(self, **kw):
+                return SessionResult(success=False, output="", error="max_turns reached",
+                                      session_id="s-abc", cost_usd=1.23)
+        import lead.member as mm
+        orig = mm.SessionManager
+        mm.SessionManager = _FakeSM
+        try:
+            result = sp.spawn(brief)
+        finally:
+            mm.SessionManager = orig
+
+        assert result.status == "FAILED", f"기대 FAILED, 실제 {result.status}"
+        assert "max_turns" in result.error or "session" in result.error
+        assert result.cost_usd == 1.23
+        assert result.session_id == "s-abc"
+
+
+def test_spawn_default_max_turns_is_120():
+    """max_turns 기본값 120 — 복잡 goal 위한 여유."""
+    import inspect
+    from lead.member import MemberSpawner
+    sig = inspect.signature(MemberSpawner.spawn)
+    assert sig.parameters["max_turns"].default == 120
+
+
 def test_high_stakes_fallback_returns_true_for_debate_bias():
     """판정 LLM 실패 시 fallback 은 True (토론 쪽) — 사용자 정책: 애매하면 토론."""
     class _BrokenLLM:

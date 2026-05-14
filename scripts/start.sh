@@ -84,5 +84,9 @@ echo "Ctrl-C 하면 tail만 종료, 시스템은 계속 실행됨"
 echo "정지하려면: ./scripts/stop.sh"
 echo "================================================================"
 
-# 로그 tail (tail이 종료해도 시스템은 안 죽음)
-tail -f "$LOG_FILE"
+# 로그 tail — TTY 일 때만 (Claude Code / nohup 같은 비-TTY 환경에서는 좀비 tail 안 만듦)
+if [ -t 1 ]; then
+    tail -f "$LOG_FILE"
+else
+    echo "비-TTY 환경 — tail 생략. 직접 따라잡으려면: tail -f $LOG_FILE"
+fi
