@@ -974,39 +974,55 @@ class TeamLead:
     def _resolve_conflicts_via_debate(
         self, new_agent_id: str, conflicts: list[str]
     ) -> None:
-        """충돌 파일마다 4-way 토론 → 결정문 → 통합본 LLM 추출 → main 덮어쓰기 + stash 정리."""
+        """**goal 한 개당 1 토론**: 한 멤버의 모든 충돌 파일을 묶어서 한 번에 토론.
+        파일마다 별도 토론하면 N×5-8분 직렬화로 비용/시간 폭증 — 한 멤버의 산출물은
+        논리적으로 연결되어 있어 한 컨텍스트에서 판단하는 게 자연스럽다.
+
+        흐름: (a) 유효 충돌 파일 모음 → (b) 1회 토론 (전체 파일 컨텍스트 묶음) →
+        (c) 파일별 통합본 추출 LLM 호출 → main 덮어쓰기 + stash 정리.
+        """
+        valid: list[tuple[str, Path, Path]] = []
         for rel in conflicts:
             if "symlink rejected" in rel:
                 continue
             rel_clean = rel.split(" ", 1)[0]
             main_path = self.ws_main / rel_clean
             stash_path = main_path.with_name(f"{main_path.name}.from-{new_agent_id}")
-            if not (main_path.exists() and stash_path.exists()):
-                continue
-            self._log(f"  🤝 충돌 토론 {rel_clean} ↔ from-{new_agent_id}")
-            merged = self._debate_one_conflict(rel_clean, main_path, stash_path, new_agent_id)
+            if main_path.exists() and stash_path.exists():
+                valid.append((rel_clean, main_path, stash_path))
+
+        if not valid:
+            return
+
+        self._log(
+            f"  🤝 goal-level 충돌 토론 ({len(valid)} 파일) ↔ from-{new_agent_id}"
+        )
+        decision = self._debate_goal_conflicts(new_agent_id, valid)
+        if decision is None:
+            self._log("  ⚠ 토론 실패 — 모든 충돌 파일 main/stash 보존 (수동 처리)")
+            return
+
+        for rel_clean, main_path, stash_path in valid:
+            merged = self._extract_merged_file(
+                rel_clean, main_path, stash_path, decision
+            )
             if merged is None:
-                self._log(f"  ⚠ 통합 실패 → main/stash 둘 다 보존 (수동 처리)")
+                self._log(f"  ⚠ 통합 추출 실패 → 보존: {rel_clean}")
                 continue
             try:
                 main_path.write_text(merged, encoding="utf-8")
                 stash_path.unlink(missing_ok=True)
                 self._log(f"  ✓ 통합 완료 {rel_clean}")
             except OSError as e:
-                self._log(f"  ⚠ 통합본 쓰기 실패: {e}")
+                self._log(f"  ⚠ 통합본 쓰기 실패 {rel_clean}: {e}")
 
-    def _debate_one_conflict(
-        self, file_rel: str, main_path: Path, stash_path: Path, new_agent_id: str
+    def _debate_goal_conflicts(
+        self,
+        new_agent_id: str,
+        valid: list[tuple[str, Path, Path]],
     ) -> Optional[str]:
-        """충돌 1건에 대한 토론 + 통합 코드 추출."""
+        """한 멤버의 모든 충돌을 묶어 한 번에 토론. 결정문에 파일별 채택 방향 포함."""
         from agents.debate import DebatePanel
-
-        try:
-            main_v = main_path.read_text(encoding="utf-8", errors="ignore")
-            stash_v = stash_path.read_text(encoding="utf-8", errors="ignore")
-        except OSError as e:
-            self._log(f"  ⚠ 충돌 파일 읽기 실패: {e}")
-            return None
 
         new_agent_dir = self.agents_root / new_agent_id
         try:
@@ -1015,19 +1031,40 @@ class TeamLead:
         except OSError:
             new_brief = new_delivery = ""
 
+        n = len(valid)
+        # 파일이 많을수록 발췌 짧게 — 전체 컨텍스트 ~12k자 상한.
+        per_file_cap = max(800, 12000 // max(1, n))
+        parts: list[str] = []
+        files_list_lines: list[str] = []
+        for i, (rel_clean, main_path, stash_path) in enumerate(valid, 1):
+            try:
+                main_v = main_path.read_text(encoding="utf-8", errors="ignore")[:per_file_cap]
+                stash_v = stash_path.read_text(encoding="utf-8", errors="ignore")[:per_file_cap]
+            except OSError:
+                continue
+            files_list_lines.append(f"{i}. `{rel_clean}`")
+            parts.append(
+                f"## 파일 {i}/{n}: `{rel_clean}`\n\n"
+                f"### Main 버전 (먼저 머지됨)\n```\n{main_v}\n```\n\n"
+                f"### {new_agent_id} 버전\n```\n{stash_v}\n```\n"
+            )
+        if not parts:
+            return None
+
         question = (
-            f"파일 `{file_rel}` 머지 충돌. main 버전(먼저 머지된 다른 멤버 작성)과 "
-            f"{new_agent_id} 버전이 다름. 양쪽 의도를 분석해 통합본을 만들거나 "
-            f"한 쪽 채택을 결정. 결정 본문에 통합 방향을 명확히 명시."
+            f"멤버 {new_agent_id} 의 {n}개 산출물 충돌. 각 파일마다 (a) main 유지, "
+            f"(b) {new_agent_id} 버전 채택, (c) 통합 — 셋 중 하나 결정. "
+            f"결정 본문은 *파일 번호 + 경로* 로 명확히 구분해 작성 (예: "
+            f"`1. agent_system/lead/main.py: (c) 통합 — 시드 prefix 유지 + 멤버 추가 라인 반영`)."
         )
         context = (
-            f"# Main 버전 ({file_rel}, 먼저 머지됨)\n```\n{main_v[:5000]}\n```\n\n"
-            f"# {new_agent_id} 버전 (이번 충돌)\n```\n{stash_v[:5000]}\n```\n\n"
+            f"# 충돌 파일 목록 ({n}개)\n" + "\n".join(files_list_lines) + "\n\n"
             f"# {new_agent_id} brief\n{new_brief}\n\n"
             f"# {new_agent_id} delivery\n{new_delivery}\n\n"
-            f"# spec 발췌\n{self.spec[:1500]}"
+            f"# spec 발췌\n{self.spec[:1500]}\n\n"
+            + "\n".join(parts)
         )
-        debate_id = f"conflict-{Path(file_rel).name.replace('.', '_')}-{int(time.time())}"
+        debate_id = f"goal-conflict-{new_agent_id}-{int(time.time())}"
         panel = DebatePanel(self.lead_state_dir / "debates", self.llm, max_rounds=2)
         try:
             outcome = panel.deliberate(
@@ -1035,32 +1072,56 @@ class TeamLead:
                 debate_id=debate_id, auto_decide=True,
             )
         except Exception as e:
-            self.timeline.emit("lead", "error",
-                               error=f"conflict debate: {e}", file=file_rel)
+            self.timeline.emit(
+                "lead", "error",
+                error=f"goal conflict debate: {e}", agent_id=new_agent_id,
+            )
             return None
 
         self.timeline.emit(
             "lead", "conflict_debated",
-            agent_id=new_agent_id, file=file_rel, debate_id=debate_id,
+            agent_id=new_agent_id,
+            file=", ".join(rel for rel, _, _ in valid),  # 호환: 기존 timeline render 가 file 키 사용
+            files=[rel for rel, _, _ in valid],
+            file_count=n,
+            debate_id=debate_id,
         )
+        return outcome.decision
 
-        # 결정문 기반 통합본 추출 — opus 한 번 더
+    def _extract_merged_file(
+        self,
+        file_rel: str,
+        main_path: Path,
+        stash_path: Path,
+        full_decision: str,
+    ) -> Optional[str]:
+        """전체 결정문에서 해당 파일에 대한 결정만 적용해 통합본 작성. opus 1회."""
+        try:
+            main_v = main_path.read_text(encoding="utf-8", errors="ignore")
+            stash_v = stash_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as e:
+            self._log(f"  ⚠ 충돌 파일 읽기 실패 {file_rel}: {e}")
+            return None
+
         system = (
-            "너는 코드 통합 작성자. 토론 결정 본문을 보고 두 버전을 통합한 최종 파일을 "
-            "출력. 출력은 정확히 ```...``` 코드 펜스 하나만; 펜스 밖 텍스트 금지. "
-            "결정이 '한 쪽 채택'이면 그 쪽 전체를 그대로 출력."
+            "너는 코드 통합 작성자. 토론 결정문은 여러 파일의 결정을 담고 있다. "
+            "지정된 파일에 대한 결정만 찾아 적용해 최종 파일을 출력. "
+            "출력은 정확히 ```...``` 코드 펜스 하나만; 펜스 밖 텍스트 금지. "
+            "결정이 '한 쪽 채택' 이면 그 쪽 전체를 그대로 출력."
         )
         user = (
-            f"# 토론 결정\n{outcome.decision}\n\n"
+            f"# 전체 토론 결정 (여러 파일 포함)\n{full_decision}\n\n"
+            f"# 대상 파일\n`{file_rel}`\n\n"
             f"# Main 버전\n```\n{main_v}\n```\n\n"
             f"# 충돌 버전\n```\n{stash_v}\n```\n\n"
-            f"# 출력: 통합 파일 전체를 ```...``` 코드 펜스 하나로만 감싸서."
+            f"# 출력: `{file_rel}` 의 최종 통합 파일을 ```...``` 코드 펜스 하나로만 감싸서."
         )
         try:
             raw = self.llm.call(system, user, tier="opus")
         except Exception as e:
-            self.timeline.emit("lead", "error",
-                               error=f"merge extract: {e}", file=file_rel)
+            self.timeline.emit(
+                "lead", "error", error=f"merge extract: {e}", file=file_rel
+            )
             return None
 
         m = re.search(r"```(?:[a-zA-Z0-9_+\-.]*)\s*\n(.*?)\n```", raw, re.DOTALL)
