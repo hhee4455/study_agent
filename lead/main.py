@@ -71,7 +71,8 @@ def parse_args():
     p.add_argument("--max-cost-usd", type=float, default=float("inf"))
     p.add_argument("--max-turns", type=int, default=2000)
     p.add_argument("--model", default="opus",
-                   help="기본 모델 (가벼운 작업은 sonnet/haiku로 자동 라우팅)")
+                   help="기본 모델. lead 의 의사결정 품질은 토큰 절감 대상이 아니다 — opus 유지. "
+                        "가벼운 작업은 tier='sonnet'/'haiku' 로 호출 지점에서 명시.")
     p.add_argument("--skip-preflight", action="store_true")
     p.add_argument(
         "--enable-evaluator", action="store_true",

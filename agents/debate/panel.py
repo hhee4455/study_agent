@@ -78,13 +78,23 @@ class DebatePanel:
 
         for round_num in range(1, self.max_rounds + 1):
             self._append(md_path, f"## Round {round_num}\n")
+            round_statements: list[str] = []
             for handle, role, persona, model in self.personas:
                 statement = self._speak(md_path, handle, role, persona, round_num, model)
+                round_statements.append(statement)
                 self._append(md_path, f"\n[{handle} / {role}]\n{statement}\n")
 
             if md_path.stat().st_size > COMPACT_THRESHOLD_BYTES:
                 self._compact(md_path)
             self._append(md_path, "\n---\n\n")
+
+            # 조기 종료: 합의 감지되면 다음 라운드 skip (iMAD/SID 패턴, ~30% 토큰 절감).
+            if round_num < self.max_rounds and self._round_is_consensus(round_statements):
+                self._append(
+                    md_path,
+                    f"_Round {round_num + 1}+ skipped: consensus detected_\n\n",
+                )
+                break
 
         summary = self._summarize(md_path)
         self._append(md_path, f"## Summary\n{summary}\n\n")
@@ -148,6 +158,25 @@ class DebatePanel:
             )
         # 모델 prefix가 codex 백엔드면 LLMClient가 자동 라우팅 (gpt-*, o*-, codex-*).
         return strip_agent_label(self.llm.call(system, user, model=model))
+
+    @staticmethod
+    def _round_is_consensus(statements: list[str]) -> bool:
+        """라운드 발언 묶음이 합의 분위기인가. True 면 추가 라운드 가치 없음.
+
+        조건 (하나라도 만족): (a) 대부분 페르소나가 '동의' prefix, (b) 모든 발언이
+        매우 짧음(<60자) — 새 논점 없음을 의미.
+        """
+        if not statements:
+            return False
+        agree_prefixes = ("동의", "agree", "찬성", "yes", "맞")
+        n = len(statements)
+        agree_n = sum(
+            1 for s in statements
+            if s.strip().lower().startswith(agree_prefixes)
+        )
+        short_n = sum(1 for s in statements if len(s.strip()) < 60)
+        # 페르소나 4명 중 3+ 동의, 또는 전원 짧음.
+        return agree_n >= max(1, n - 1) or short_n == n
 
     @staticmethod
     def _slim_context(md_path: Path, round_num: int) -> str:

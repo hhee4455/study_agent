@@ -18,13 +18,21 @@ from core.rate_limit import (
 
 
 def build_cli_command(model: str, system: str) -> list[str]:
-    """claude CLI 명령어 조립. 테스트 가능하게 분리."""
+    """claude CLI 명령어 조립. 내부 LLM 호출 전용 (text-only).
+
+    `--disallowedTools` 로 모든 파일·셸 도구 차단 — lead 내부 호출(plan 분해,
+    hire_brief, reply 등)이 cwd 의 파일을 직접 건드리면 안 된다 (예: LLM 이
+    plan.md 를 Write 툴로 직접 작성해 cwd=agent_system/ 에 떨어뜨린 사건).
+    멤버 spawn 은 별도 경로(`lead/member.py`)에서 자체 allowedTools 를 지정.
+    """
     return [
         "claude", "-p",
         "--output-format", "stream-json",
         "--verbose",
         "--model", model,
         "--append-system-prompt", system,
+        "--disallowedTools",
+        "Read,Write,Edit,Bash,Grep,Glob,WebFetch,WebSearch,Task,NotebookEdit,TodoWrite",
     ]
 
 

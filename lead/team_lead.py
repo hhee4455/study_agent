@@ -259,14 +259,39 @@ class TeamLead:
             progressed = True
 
         # 1) 새 메시지 (status, question, delivery) 스캔
+        # registry 에 없는 agent_id 의 메시지는 last_msg_id 갱신 못 해서 다음 tick 에 또
+        # 잡힘 → 무한 로그 폭주. 이런 orphan(이전 run 자식 claude 잔여물)은 mailbox 디렉토리
+        # 자체를 격리해 scan_new 가 더 못 보게 한다.
         new_msgs = scan_new(self.agents_root, self.registry.last_seen_map())
+        orphan_ids: set[str] = set()
         for m in new_msgs:
-            self._log(f"  📨 {m.from_}→{m.to} {m.kind} #{m.id}")
             agent_id = m.from_ if m.to == "lead" else m.to
             rec = self.registry.get(agent_id)
-            if rec:
-                self.registry.update(agent_id, last_msg_id=m.id)
+            if rec is None:
+                if agent_id not in self._pending:
+                    orphan_ids.add(agent_id)
+                continue
+            self._log(f"  📨 {m.from_}→{m.to} {m.kind} #{m.id}")
+            self.registry.update(agent_id, last_msg_id=m.id)
+            progressed = True
+
+        for orphan_id in orphan_ids:
+            src = self.agents_root / orphan_id
+            if not src.exists():
+                continue
+            ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            dst = self.lead_state_dir / "orphan_agents" / f"{orphan_id}-{ts}"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                src.rename(dst)
+                self._log(f"  🗑️  orphan {orphan_id} → orphan_agents/ 격리 (registry 없음)")
+                self.timeline.emit(
+                    "lead", "orphan_archived",
+                    agent_id=orphan_id, archive=str(dst),
+                )
                 progressed = True
+            except OSError as e:
+                self._log(f"  ⚠️ orphan {orphan_id} 격리 실패: {e}")
 
         # 2) WAITING 멤버 → 답변 → 재spawn (비동기 submit)
         for rec in self.registry.by_status("WAITING"):

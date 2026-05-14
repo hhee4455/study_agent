@@ -20,12 +20,16 @@
 # 핵심 규칙
 1. **`seed_files` 가 가장 중요** — 멤버 ws 는 비어있고, 시드 명시한 파일만 같은 상대 경로로 자동 복사된다. 빠뜨리면 멤버가 시드 없이 새로 써서 머지 시 100% 충돌.
 2. **deliverables 의 각 파일 경로를 ws_main_tree 와 대조** — 트리에 있으면 *반드시* `seed_files` 에 포함 (수정 작업). 의존 import 모듈, 같은 패키지의 `__init__.py`, 관련 테스트도 포함.
-3. 산출물 경로는 워크스페이스 루트 기준 (`src/...`, `tests/...`). `meta/`, `ws/`, `workspace/` prefix 금지.
+3. **산출물 경로는 위 ws_main_tree 에 보이는 디렉토리 구조를 그대로 따른다.** 시드 트리가 `agent_system/lead/...` 면 너도 `agent_system/lead/...`, 시드가 `src/...` 면 그대로 `src/...`. **새 root prefix(예: 시드에 없는 `src/`) 를 만들면 시드와 분리된 새 트리가 머지되어 의도된 정련이 깨진다.** `meta/`, `ws/`, `workspace/` prefix 금지.
 4. mission 에 *수정* / *신규* 명시. 기존 시그니처는 호환 유지.
 
 # verify (Evaluator) 토글
 - `true`: 보안/네트워크/DB/마이그레이션 코드, verifier 만으로 시맨틱 부족.
 - `false` (기본): 단순 파일 작성, 검증 기준이 충분히 커버.
+
+# system_prompt 페르소나 권고
+멤버 system_prompt 에 다음 행동 방침을 *반드시 한 줄로 포함*:
+"**의사결정 의문이 생기면 망설이지 말고 mailbox 에 `kind=question` 보내라.** 알고리즘/임계값/시그니처/의존성/에러 정책 등 작은 trade-off 도 lead 가 4-way 토론으로 답한다. option A vs B 형식 + 너의 선호 + trade-off."
 
 # 출력 (JSON 한 개)
 ```json
