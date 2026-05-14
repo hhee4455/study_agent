@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # 다음 강화 사이클을 위한 워크스페이스 리셋.
 #
-# 보존: ws/main/ (완성된 코드), workspace 의 spec 파일들 (requirements/continuation),
+# 보존: ws/main/ (완성된 코드), workspace 의 spec 파일들,
+#       state/lead/plan.md (+ plan.replaced-*.md) — 다음 --replan 사이클의 백업 입력,
 #       agent_system 자체.
-# 삭제: ws/members/* (이미 머지 끝난 멤버 ws), state/ 전체 (registry/plan/log/budget).
+# 삭제: ws/members/* (이미 머지 끝난 멤버 ws),
+#       state/agents/, state/session_logs/, state/llm_logs/, state/logs/, budget.json,
+#       state/lead/ 안의 events.jsonl / timeline.md / conflicts/.
 #
 # 사용법:
 #   ./scripts/reset.sh                # dry-run (실제로는 안 지움, 무엇이 지워질지 표시만)
@@ -34,8 +37,12 @@ for arg in "$@"; do
             cat <<'EOF'
 다음 강화 사이클을 위한 워크스페이스 리셋.
 
-보존: ws/main/ (완성된 코드), workspace/project.md (spec), agent_system 자체.
-삭제: ws/members/* (이미 머지 끝난 멤버 ws), state/ 전체 (registry/plan/log/budget).
+보존: ws/main/ (완성된 코드), workspace/project.md (spec),
+      state/lead/plan.md (+ plan.replaced-*.md) — 다음 --replan 사이클의 백업 입력,
+      agent_system 자체.
+삭제: ws/members/* (이미 머지 끝난 멤버 ws),
+      state/agents/, state/session_logs/, state/llm_logs/, state/logs/, budget.json,
+      state/lead/ 안의 events.jsonl / timeline.md / conflicts/.
 
 사용법:
   ./scripts/reset.sh                       # dry-run (안 지움, 무엇이 지워질지 표시만)
@@ -88,10 +95,22 @@ done
 
 # 2) state/ 의 하위 항목. ws/main 과 spec 은 안 건드림.
 if [ -d "$CHECKPOINT" ]; then
-    for sub in agents lead session_logs llm_logs logs; do
+    for sub in agents session_logs llm_logs logs; do
         p="$CHECKPOINT/$sub"
         [ -e "$p" ] && TARGETS+=("$p")
     done
+    # state/lead 는 통째 삭제 X. plan.md / plan.replaced-*.md 는 다음 --replan
+    # 사이클의 백업 입력으로 보존하고, 나머지(events.jsonl, timeline.md, conflicts/) 만 정리.
+    if [ -d "$CHECKPOINT/lead" ]; then
+        for item in "$CHECKPOINT/lead"/*; do
+            [ -e "$item" ] || continue
+            base=$(basename "$item")
+            case "$base" in
+                plan.md|plan.replaced-*.md) ;;   # 보존
+                *) TARGETS+=("$item") ;;
+            esac
+        done
+    fi
     # budget.json — 옵션으로 보존 가능 (누적 비용 추적 유지 원할 때)
     if [ -f "$CHECKPOINT/budget.json" ] && [ "$KEEP_BUDGET" -eq 0 ]; then
         TARGETS+=("$CHECKPOINT/budget.json")
@@ -119,6 +138,7 @@ echo ""
 echo "보존 (검증용):"
 echo "  - $WS_ROOT/main/                ws/main 완성 코드"
 echo "  - ../workspace/project.md       spec (단일 source of truth)"
+echo "  - $CHECKPOINT/lead/plan.md      다음 --replan 사이클의 백업 입력"
 [ "$KEEP_BUDGET" -eq 1 ] && echo "  - $CHECKPOINT/budget.json       누적 비용 유지"
 
 case "$MODE" in

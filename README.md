@@ -61,7 +61,7 @@ $EDITOR ../workspace/project.md
 
 - `--replan`: 기존 `state/lead/plan.md` 를 `plan.replaced-{ts}.md` 로 백업 후 새 spec 으로 재분해
 - lead 가 ws/main 의 현재 파일 트리를 보고 "기존 수정 vs 신규 작성" 자체 판단 → goal 생성
-- 멤버는 ws/main 의 기존 파일 경로 그대로 *수정본* 작성 → 자동 머지 충돌 토론으로 통합
+- 멤버는 ws/main 의 기존 파일 경로 그대로 *수정본* 작성 → 단일 멤버 vs main 충돌은 4-페르소나 debate panel 이 자동 통합. 두 멤버가 같은 파일을 동시 수정한 경우는 순차 머지(먼저 머지된 버전 위에 두 번째 멤버의 변경이 충돌로 보존됨, 3-way 머지 없음 — 라인 168 참고).
 
 ## 동작 원리
 
