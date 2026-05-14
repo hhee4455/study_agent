@@ -1,6 +1,6 @@
 """lead/main.py — 팀장 시스템 진입점.
 
-  python -m lead.main --spec requirements.md --workspace ws/main --checkpoint <state_dir>
+  python -m lead.main --spec project.md --workspace ws/main --checkpoint <state_dir>
 
 종료 코드:
   0   완료
@@ -81,6 +81,10 @@ def parse_args():
         "--max-parallel", type=int, default=3,
         help="동시 실행 가능한 팀원 수 (default 3). 너무 크면 burst rate limit + 충돌 ↑. 1=직렬.",
     )
+    p.add_argument(
+        "--replan", action="store_true",
+        help="기존 plan.md 를 archive 하고 새 spec 기반으로 재분해. main 점진 강화 시 사용.",
+    )
     return p.parse_args()
 
 
@@ -150,6 +154,7 @@ def main() -> int:
         default_model=args.model,
         enable_evaluator=args.enable_evaluator,
         max_parallel=args.max_parallel,
+        replan=args.replan,
     )
 
     try:

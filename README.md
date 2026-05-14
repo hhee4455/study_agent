@@ -14,7 +14,7 @@ sentinel-deepactive/
 │   ├── decisions/        # 시스템 진화 토론 결과 (p4/p5 등)
 │   └── README.md
 └── workspace/            # ★ 실 작업물 (별도 git 가능)
-    ├── requirements.md   # 입력 spec
+    ├── project.md        # 입력 spec (단일 source of truth — 매번 이것만 갱신)
     ├── state/            # 런타임 (lead 로그, agents.json, ...)
     └── ws/
         ├── main/         # 멤버 산출물 통합 결과
@@ -27,15 +27,15 @@ sentinel-deepactive/
 # 1. 의존성 확인
 claude --version && claude -p "ping"
 
-# 2. 요구서 작성 (workspace/requirements.md)
-cat > ../workspace/requirements.md <<'EOF'
+# 2. 프로젝트 정의 작성 (workspace/project.md)
+cat > ../workspace/project.md <<'EOF'
 # 내 프로젝트
 - hello.txt에 "안녕 세상" 한 줄
 - README.md 한 단락
 EOF
 
 # 3. 백그라운드 실행 (agent_system/ 안에서)
-./scripts/start.sh ../workspace/requirements.md --max-hours 0.5
+./scripts/start.sh ../workspace/project.md --max-hours 0.5
 
 # 4. 사람 친화 로그 실시간 보기 (다른 터미널)
 tail -f ../workspace/state/lead/timeline.md
@@ -43,6 +43,25 @@ tail -f ../workspace/state/lead/timeline.md
 # 5. 정지
 ./scripts/stop.sh
 ```
+
+## main 점진 강화 흐름
+
+기존 ws/main 위에 새 기능/전략을 추가하고 싶을 때:
+
+```bash
+# 1. project.md 의 해당 섹션을 새 내용으로 수정 (전체 spec 통합 유지)
+$EDITOR ../workspace/project.md
+
+# 2. 이전 사이클의 멤버 ws / state 정리
+./scripts/reset.sh --apply
+
+# 3. --replan 으로 새 spec 기반 plan 재분해 + ws/main 트리 컨텍스트 자동 전달
+./scripts/start.sh ../workspace/project.md --replan --max-hours 2 --max-parallel 2
+```
+
+- `--replan`: 기존 `state/lead/plan.md` 를 `plan.replaced-{ts}.md` 로 백업 후 새 spec 으로 재분해
+- lead 가 ws/main 의 현재 파일 트리를 보고 "기존 수정 vs 신규 작성" 자체 판단 → goal 생성
+- 멤버는 ws/main 의 기존 파일 경로 그대로 *수정본* 작성 → 자동 머지 충돌 토론으로 통합
 
 ## 동작 원리
 

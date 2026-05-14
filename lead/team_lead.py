@@ -107,6 +107,7 @@ class TeamLead:
         default_model: str = "opus",
         enable_evaluator: bool = False,
         max_parallel: int = 3,
+        replan: bool = False,
     ):
         self.spec = spec
         self.spec_name = spec_name
@@ -121,6 +122,7 @@ class TeamLead:
         self.health = health
         self.enable_evaluator = enable_evaluator
         self.max_parallel = max(1, max_parallel)
+        self.replan = replan
 
         lead_state_dir.mkdir(parents=True, exist_ok=True)
         agents_root.mkdir(parents=True, exist_ok=True)
@@ -154,6 +156,17 @@ class TeamLead:
 
         # 이전 run 이 죽어 zombie 가 된 RUNNING 멤버 복구 (delivery 있으면 DONE 으로, 없으면 FAILED + plan 에서 unassign)
         self._recover_zombies()
+
+        # --replan: 기존 plan.md 를 timestamp 붙여 백업하고 spec 기반 재분해.
+        # "main 점진 강화" 흐름에서 새 spec 으로 다시 plan 분해할 때 사용.
+        if self.replan and self.plan_md.exists():
+            archive = self.plan_md.with_name(
+                f"plan.replaced-{int(time.time())}.md"
+            )
+            self.plan_md.rename(archive)
+            self._log(f"  📋 --replan: 기존 plan → {archive.name} 으로 백업, 재분해 진행")
+            self.timeline.emit("lead", "plan_update",
+                               note=f"--replan: 기존 plan archive → {archive.name}")
 
         if not self.plan_md.exists():
             self._initial_plan()
@@ -446,7 +459,10 @@ class TeamLead:
         """spec → plan.md 초기 분해 (한 번만)."""
         self._log("🧭 plan.md 초기 분해")
         system, user = render_split(
-            "plan_initial", spec_name=self.spec_name, spec=self.spec[:6000]
+            "plan_initial",
+            spec_name=self.spec_name,
+            spec=self.spec[:6000],
+            ws_main_tree=self._ws_main_summary(),
         )
         try:
             # 한 번만 호출되는 핵심 결정 — 모든 goal scope 가 여기서 결정됨. opus.

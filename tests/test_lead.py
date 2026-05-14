@@ -924,6 +924,52 @@ def test_spawn_default_max_turns_is_120():
     assert sig.parameters["max_turns"].default == 120
 
 
+def test_replan_archives_old_plan_and_redecomposes():
+    """replan=True 로 시작하면 기존 plan.md 가 archive 되고 새 spec 으로 재분해."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM([
+            "# Plan\n- [ ] G-NEW-001-foo: new goal",  # initial_plan 응답
+            '{"mission":"foo","deliverables":["foo.txt"],'
+            '"verification_checks":[],"system_prompt":"foo worker",'
+            '"allowed_tools":["Write"]}',
+        ])
+        lead = _make_team_lead(Path(d), llm)
+        # 기존 plan.md 가 있는 상태 (이미 done 된 것처럼)
+        lead.plan_md.parent.mkdir(parents=True, exist_ok=True)
+        lead.plan_md.write_text("# Plan\n- [x] G-OLD-001-done: 이전\n")
+        # replan flag 켜기 + 한 번 spawn DONE 으로 끝나도록 stub
+        lead.replan = True
+        _stub_spawner(lead, [{
+            "status": "DONE", "files": {"foo.txt": "ok"}, "delivery": "done",
+        }])
+        rc = lead.run()
+        # 신규 plan 으로 재분해됐는지 (G-NEW-001 이 있고 archived plan.replaced-* 파일이 있음)
+        assert "G-NEW-001-foo" in lead.plan_md.read_text()
+        archives = list(lead.lead_state_dir.glob("plan.replaced-*.md"))
+        assert archives, f"archive 생성 안 됨. 디렉토리={list(lead.lead_state_dir.iterdir())}"
+        assert "G-OLD-001-done" in archives[0].read_text()
+        assert rc == 0
+
+
+def test_initial_plan_prompt_receives_ws_main_tree():
+    """_initial_plan 이 ws_main_tree 를 render_split 에 전달."""
+    captured = {}
+    class _CaptureLLM:
+        def call(self, system, user, **kw):
+            captured["user"] = user
+            return "# Plan\n- [ ] G-001-x: hello"
+    with tempfile.TemporaryDirectory() as d:
+        lead = _make_team_lead(Path(d), _CaptureLLM())
+        # ws/main 에 파일 하나 만들어두기 (ws_main_tree 가 거기서 뽑아야 함)
+        (lead.ws_main / "src" / "pkg").mkdir(parents=True)
+        (lead.ws_main / "src" / "pkg" / "mod.py").write_text("x=1")
+        lead._initial_plan()
+        # render_split 의 user prompt 안에 ws/main 트리 + 분해 규칙 단어들이 보여야 함
+        assert "src/pkg/mod.py" in captured["user"], "ws_main_tree 가 prompt 에 안 들어감"
+        assert "기존" in captured["user"] or "재사용" in captured["user"], \
+            "분해 규칙 안내가 prompt 에 없음"
+
+
 def test_final_verification_passes_when_pytest_returns_zero():
     """ws/main 에 통과하는 더미 테스트 두면 _final_verification 이 True 반환."""
     with tempfile.TemporaryDirectory() as d:

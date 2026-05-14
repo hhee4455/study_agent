@@ -5,7 +5,7 @@
 #   ./scripts/start.sh <spec.md> [추가 옵션]
 #
 # 예:
-#   ./scripts/start.sh requirements.md --max-hours 24
+#   ./scripts/start.sh project.md --max-hours 24
 #
 # 스크립트는 백그라운드 실행 후 PID 파일에 저장하고 로그를 tail.
 # Ctrl-C로 tail 종료 → 시스템은 계속 실행 (nohup 효과).
@@ -20,7 +20,7 @@ cd "$ROOT_DIR"
 if [ $# -lt 1 ]; then
     echo "사용법: $0 <spec.md> [추가 옵션]"
     echo ""
-    echo "예: $0 requirements.md --max-hours 24 --max-turns 2000"
+    echo "예: $0 project.md --max-hours 24 --max-turns 2000"
     exit 1
 fi
 
