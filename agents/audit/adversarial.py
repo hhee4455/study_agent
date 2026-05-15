@@ -14,16 +14,16 @@ reward hacking을 막기 위해 reverse 방향의 검토:
 - UNCERTAIN 2+ → 경고 누적 (state/adversarial_warnings.json), 5회 시 강제 중단
 - 그 외 → 통과
 """
+
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal
 
 from core.llm import LLMClient, parse_json_loose
-
 
 Verdict = Literal["PASS", "FAIL", "UNCERTAIN"]
 
@@ -70,9 +70,7 @@ class AdversarialReport:
 
 
 VERDICT_RE = re.compile(r"\b(PASS|FAIL|UNCERTAIN)\b")
-EVIDENCE_HINT_RE = re.compile(
-    r"(\.\w+:\d+|\$\s*\S|`[^`]+`|^- \S|입력[:：])", re.MULTILINE
-)
+EVIDENCE_HINT_RE = re.compile(r"(\.\w+:\d+|\$\s*\S|`[^`]+`|^- \S|입력[:：])", re.MULTILINE)
 
 
 class AdversarialVerifier:
@@ -96,8 +94,9 @@ class AdversarialVerifier:
         verifier_log: str = "",
     ) -> AdversarialReport:
         judgements = [
-            self._ask_persona(name, persona_brief, task_title, spec_excerpt,
-                              artifacts_summary, verifier_log)
+            self._ask_persona(
+                name, persona_brief, task_title, spec_excerpt, artifacts_summary, verifier_log
+            )
             for name, persona_brief in PERSONAS
         ]
 
@@ -165,31 +164,31 @@ class AdversarialVerifier:
 
     # ---- warnings 영속화 ----
 
-    def _load_warnings(self) -> list[dict]:
+    def _load_warnings(self) -> list[dict[str, Any]]:
         if not self.warnings_path.exists():
             return []
         try:
-            return json.loads(self.warnings_path.read_text())
+            result: list[dict[str, Any]] = json.loads(self.warnings_path.read_text())
+            return result
         except (json.JSONDecodeError, OSError):
             return []
 
     def _load_warning_count(self) -> int:
         return len(self._load_warnings())
 
-    def _bump_warnings(
-        self, task_id: str, judgements: list[PersonaJudgement]
-    ) -> int:
+    def _bump_warnings(self, task_id: str, judgements: list[PersonaJudgement]) -> int:
         warnings = self._load_warnings()
-        warnings.append({
-            "task_id": task_id,
-            "uncertain": [
-                {"persona": j.persona, "evidence": j.evidence}
-                for j in judgements if j.verdict == "UNCERTAIN"
-            ],
-        })
-        self.warnings_path.write_text(
-            json.dumps(warnings, indent=2, ensure_ascii=False)
+        warnings.append(
+            {
+                "task_id": task_id,
+                "uncertain": [
+                    {"persona": j.persona, "evidence": j.evidence}
+                    for j in judgements
+                    if j.verdict == "UNCERTAIN"
+                ],
+            }
         )
+        self.warnings_path.write_text(json.dumps(warnings, indent=2, ensure_ascii=False))
         return len(warnings)
 
 

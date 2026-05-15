@@ -10,11 +10,14 @@
   6   claude CLI 미설치/로그인 안 됨
   130 사용자 중단
 """
+
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 from pathlib import Path
+from types import FrameType
 
 # 패키지 경로 (직접 실행 시)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,9 +26,7 @@ from core.budget import BudgetExceeded, BudgetLimits, BudgetManager
 from core.cli_caller import make_codex_raw_factory, make_raw_llm_factory
 from core.health import HealthExhausted, HealthMonitor
 from core.llm import LLMClient
-
 from lead.team_lead import TeamLead
-
 
 EXIT_OK = 0
 EXIT_NO_PROGRESS = 3
@@ -35,19 +36,45 @@ EXIT_CLAUDE_MISSING = 6
 EXIT_HEALTH = 7
 EXIT_INTERRUPT = 130
 
+# graceful shutdown 시 in-flight spawn 마무리 대기 한도 (초). 30s 가 한 멤버
+# 사이클 자연 종료 충분치 — 초과 시 강제 종료 + 경고.
+GRACEFUL_SHUTDOWN_TIMEOUT_SEC = 30.0
+
+
+def _install_signal_handlers(lead: TeamLead) -> None:
+    """SIGTERM / SIGINT 핸들러를 등록.
+
+    핸들러는 lead._shutdown_requested 플래그만 set 하고 즉시 반환 — 메인 루프가
+    polling 으로 감지해 in-flight drain 후 종료. 실제 drain 은 main() finally 의
+    ``lead.graceful_shutdown(...)`` 가 책임. 시그널 컨텍스트에서 무거운 작업 금지.
+    """
+
+    def _handler(signum: int, _frame: FrameType | None) -> None:
+        name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        print(f"\n🛑 {name} 수신 — graceful shutdown 요청", flush=True)
+        lead._shutdown_requested = True
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
+
 
 def _preflight(skip: bool) -> None:
     """claude CLI 설치 + 로그인 확인."""
     if skip:
         return
-    import shutil, subprocess
+    import shutil
+    import subprocess
+
     if not shutil.which("claude"):
         print("❌ claude CLI 미설치 (npm i -g @anthropic-ai/claude-code)", file=sys.stderr)
         sys.exit(EXIT_CLAUDE_MISSING)
     try:
         proc = subprocess.run(
             ["claude", "-p", "--output-format", "json", "ping"],
-            input="", capture_output=True, text=True, timeout=30,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except subprocess.TimeoutExpired:
         print("⚠️  preflight 30s 타임아웃 — 계속", file=sys.stderr)
@@ -60,30 +87,39 @@ def _preflight(skip: bool) -> None:
         print(f"⚠️  preflight 실패 (계속): {proc.stderr[:200]}", file=sys.stderr)
 
 
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="팀장-팀원 에이전트 시스템 (lead entry)"
-    )
+def parse_args() -> argparse.Namespace:
+    """CLI 인자 파서. `python -m lead.main` 진입점에서 호출."""
+    p = argparse.ArgumentParser(description="팀장-팀원 에이전트 시스템 (lead entry)")
     p.add_argument("--spec", required=True, help="요구서 .md")
     p.add_argument("--workspace", required=True, help="메인 워크스페이스 (ws/main)")
     p.add_argument("--checkpoint", required=True, help="상태 디렉토리 (<state_dir>)")
     p.add_argument("--max-hours", type=float, default=12.0)
     p.add_argument("--max-cost-usd", type=float, default=float("inf"))
     p.add_argument("--max-turns", type=int, default=2000)
-    p.add_argument("--model", default="opus",
-                   help="기본 모델. lead 의 의사결정 품질은 토큰 절감 대상이 아니다 — opus 유지. "
-                        "가벼운 작업은 tier='sonnet'/'haiku' 로 호출 지점에서 명시.")
+    p.add_argument(
+        "--model",
+        default="opus",
+        help="기본 모델. lead 의 의사결정 품질은 토큰 절감 대상이 아니다 — opus 유지. "
+        "가벼운 작업은 tier='sonnet'/'haiku' 로 호출 지점에서 명시.",
+    )
     p.add_argument("--skip-preflight", action="store_true")
     p.add_argument(
-        "--enable-evaluator", action="store_true",
-        help="Anthropic critique-refine 패턴: 각 멤버 산출물에 AdversarialVerifier 1회 통과. 비용 증가, 품질 ↑.",
+        "--enable-evaluator",
+        action="store_true",
+        help=(
+            "Anthropic critique-refine 패턴: 각 멤버 산출물에 "
+            "AdversarialVerifier 1회 통과. 비용 증가, 품질 ↑."
+        ),
     )
     p.add_argument(
-        "--max-parallel", type=int, default=3,
+        "--max-parallel",
+        type=int,
+        default=3,
         help="동시 실행 가능한 팀원 수 (default 3). 너무 크면 burst rate limit + 충돌 ↑. 1=직렬.",
     )
     p.add_argument(
-        "--replan", action="store_true",
+        "--replan",
+        action="store_true",
         help="기존 plan.md 를 archive 하고 새 spec 기반으로 재분해. main 점진 강화 시 사용.",
     )
     return p.parse_args()
@@ -127,12 +163,8 @@ def main() -> int:
     )
     budget = BudgetManager(limits, state_dir / "budget.json")
     llm = LLMClient(
-        raw_caller_factory=make_raw_llm_factory(
-            llm_log_dir=state_dir / "llm_logs"
-        ),
-        codex_factory=make_codex_raw_factory(
-            llm_log_dir=state_dir / "llm_logs"
-        ),
+        raw_caller_factory=make_raw_llm_factory(llm_log_dir=state_dir / "llm_logs"),
+        codex_factory=make_codex_raw_factory(llm_log_dir=state_dir / "llm_logs"),
         default_model=args.model,
         budget=budget.record,
     )
@@ -158,6 +190,16 @@ def main() -> int:
         replan=args.replan,
     )
 
+    # SIGTERM / SIGINT 핸들러: TeamLead 생성 직후·restore_state() 직전에 등록 —
+    # 핸들러가 건드리는 lead._shutdown_requested 는 TeamLead.__init__ 에서 이미
+    # False 로 초기화돼 있어야 한다 (Skeptic 가드레일). flag set → 메인 루프가
+    # polling 으로 감지 → drain.
+    _install_signal_handlers(lead)
+
+    # 재시작 시 이전 run 의 in-flight 멤버/충돌 큐 복원 (mailbox + PID 기반).
+    # run() 이전이라 _executor 가 None — restore_state 는 registry/flag 만 만지고 spawn 안 함.
+    lead.restore_state()
+
     try:
         return lead.run()
     except BudgetExceeded as e:
@@ -169,6 +211,10 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n⏹️  사용자 중단", flush=True)
         return EXIT_INTERRUPT
+    finally:
+        # 정상/예외/시그널 어떤 경로로 빠져나오든 in-flight spawn 30s grace drain.
+        # 큐의 남은 충돌은 디스크에 보존 → 다음 run 의 restore_state 가 픽업.
+        lead.graceful_shutdown(timeout=GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
 
 
 if __name__ == "__main__":

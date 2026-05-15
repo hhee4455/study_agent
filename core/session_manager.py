@@ -5,6 +5,7 @@
 
 실제 호출은 `claude -p` CLI 가정. anthropic SDK나 Managed Agents로 교체 가능.
 """
+
 from __future__ import annotations
 
 import json
@@ -12,7 +13,6 @@ import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -24,12 +24,19 @@ class SessionConfig:
     # - Read/Write/Edit/Bash: 파일/명령 작업
     # - WebSearch/WebFetch: 인터넷 자료 수집 (라이브러리 문서, API 스펙, 시세 등)
     # - Grep/Glob: ws 내부 탐색 (Bash로 가능하지만 명시적으로 빠름)
-    allowed_tools: list[str] = field(default_factory=lambda: [
-        "Read", "Write", "Edit", "Bash",
-        "WebSearch", "WebFetch",
-        "Grep", "Glob",
-    ])
-    system_prompt_path: Optional[Path] = None
+    allowed_tools: list[str] = field(
+        default_factory=lambda: [
+            "Read",
+            "Write",
+            "Edit",
+            "Bash",
+            "WebSearch",
+            "WebFetch",
+            "Grep",
+            "Glob",
+        ]
+    )
+    system_prompt_path: Path | None = None
 
 
 @dataclass
@@ -37,8 +44,8 @@ class SessionResult:
     success: bool
     output: str = ""
     error: str = ""
-    session_id: str = ""        # claude CLI 의 result 이벤트 session_id (재spawn --resume 후속용)
-    cost_usd: float = 0.0       # 이 spawn 의 total_cost_usd (멤버별 누적용)
+    session_id: str = ""  # claude CLI 의 result 이벤트 session_id (재spawn --resume 후속용)
+    cost_usd: float = 0.0  # 이 spawn 의 total_cost_usd (멤버별 누적용)
 
 
 class SessionManager:
@@ -53,7 +60,7 @@ class SessionManager:
         task_id: str,
         prompt: str,
         config: SessionConfig,
-        context_files: Optional[list[Path]] = None,
+        context_files: list[Path] | None = None,
     ) -> SessionResult:
         full_prompt = self._assemble_prompt(prompt, context_files or [])
 
@@ -72,14 +79,17 @@ class SessionManager:
         parts.append(f"<task>\n{prompt}\n</task>")
         return "\n\n".join(parts)
 
-    def _execute(
-        self, full_prompt: str, config: SessionConfig, log_dir: Path
-    ) -> SessionResult:
+    def _execute(self, full_prompt: str, config: SessionConfig, log_dir: Path) -> SessionResult:
         cmd = [
-            "claude", "-p", full_prompt,
-            "--model", config.model,
-            "--max-turns", str(config.max_turns),
-            "--output-format", "stream-json",
+            "claude",
+            "-p",
+            full_prompt,
+            "--model",
+            config.model,
+            "--max-turns",
+            str(config.max_turns),
+            "--output-format",
+            "stream-json",
             "--verbose",
         ]
         if config.system_prompt_path and config.system_prompt_path.exists():
@@ -106,7 +116,7 @@ class SessionManager:
             timed_out["v"] = True
             try:
                 proc.kill()
-            except Exception:
+            except OSError:
                 pass
 
         timer = threading.Timer(config.timeout_sec, _kill_on_timeout)
@@ -143,8 +153,10 @@ class SessionManager:
 
         if timed_out["v"]:
             return SessionResult(
-                success=False, error=f"세션 타임아웃 ({config.timeout_sec}s)",
-                session_id=session_id, cost_usd=cost_usd,
+                success=False,
+                error=f"세션 타임아웃 ({config.timeout_sec}s)",
+                session_id=session_id,
+                cost_usd=cost_usd,
             )
 
         stderr_content = proc.stderr.read() if proc.stderr else ""

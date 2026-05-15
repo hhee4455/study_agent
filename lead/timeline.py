@@ -11,30 +11,32 @@ raw 데이터 (보존):
 
 전략: 매 tick마다 full rebuild. 멤버 수가 적고 파일 작아서 충분.
 """
+
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any
 
 
 @dataclass
 class TimelineEntry:
     ts: str
-    actor: str        # "lead" | agent_id | "system"
-    icon: str         # ▶ ■ ★ ? ✓ ✗ ⚒ etc
+    actor: str  # "lead" | agent_id | "system"
+    icon: str  # ▶ ■ ★ ? ✓ ✗ ⚒ etc
     text: str
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _truncate(text: str, n: int = 200) -> str:
     text = " ".join(text.split())
-    return text if len(text) <= n else text[:n - 1] + "…"
+    return text if len(text) <= n else text[: n - 1] + "…"
 
 
 class TimelineRenderer:
@@ -50,12 +52,16 @@ class TimelineRenderer:
         self.events_path = lead_state_dir / "events.jsonl"
         self.timeline_path = lead_state_dir / "timeline.md"
         lead_state_dir.mkdir(parents=True, exist_ok=True)
+        # 인메모리 미러 — 단위 테스트가 디스크 IO 없이 검증할 수 있게.
+        # run 1회 분량(수백~수천 이벤트)이라 메모리 부담 없음.
+        self.events: list[dict[str, Any]] = []
 
     # ---- 팀장이 호출하는 emitter ----
 
-    def emit(self, actor: str, kind: str, **fields) -> None:
+    def emit(self, actor: str, kind: str, **fields: object) -> None:
         """팀장이 직접 기록할 이벤트 (hire, reply, verify, merge, error 등)."""
-        rec = {"ts": _now_iso(), "actor": actor, "kind": kind, **fields}
+        rec: dict[str, Any] = {"ts": _now_iso(), "actor": actor, "kind": kind, **fields}
+        self.events.append(rec)
         with self.events_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -124,11 +130,15 @@ class TimelineRenderer:
         return out
 
     @staticmethod
-    def _render_event(kind: str, e: dict) -> tuple[str, str]:
+    def _render_event(kind: str, e: dict[str, Any]) -> tuple[str, str]:
         if kind == "hire":
-            return "⚒", f"채용 {e.get('agent_id')} → 목표 \"{_truncate(e.get('goal', ''), 80)}\""
+            return "⚒", f'채용 {e.get("agent_id")} → 목표 "{_truncate(e.get("goal", ""), 80)}"'
         if kind == "reply":
-            return "★", f"reply → {e.get('to')} (ref={e.get('ref')}): \"{_truncate(e.get('summary', ''), 100)}\""
+            summary = _truncate(e.get("summary", ""), 100)
+            return (
+                "★",
+                f'reply → {e.get("to")} (ref={e.get("ref")}): "{summary}"',
+            )
         if kind == "verify_pass":
             return "✓", f"{e.get('agent_id')} verify pass ({e.get('checks', 0)} checks)"
         if kind == "verify_fail":
@@ -145,7 +155,7 @@ class TimelineRenderer:
         if kind == "debate_decided":
             return "⚖", (
                 f"토론 결정 ({e.get('debate_id', '?')}) for {e.get('agent_id')}: "
-                f"\"{_truncate(e.get('summary', ''), 120)}\""
+                f'"{_truncate(e.get("summary", ""), 120)}"'
             )
         if kind == "code_janitor":
             return "🧹", (
@@ -170,27 +180,27 @@ class TimelineRenderer:
         for agent_dir in sorted(self.agents_root.iterdir()):
             if not agent_dir.is_dir():
                 continue
-            agent_id = agent_dir.name
             for m in parse_messages(agent_dir / "mailbox.md"):
                 if m.kind == "instruction":
                     icon = "★"
-                    text = f"{m.from_} → {m.to} (instruction #{m.id}): \"{_truncate(m.body, 120)}\""
+                    text = f'{m.from_} → {m.to} (instruction #{m.id}): "{_truncate(m.body, 120)}"'
                     actor = m.to
                 elif m.kind == "question":
                     icon = "?"
-                    text = f"{m.from_} → {m.to} (question #{m.id}): \"{_truncate(m.body, 120)}\""
+                    text = f'{m.from_} → {m.to} (question #{m.id}): "{_truncate(m.body, 120)}"'
                     actor = m.from_
                 elif m.kind == "reply":
                     icon = "↩"
-                    text = f"{m.from_} → {m.to} (reply #{m.id} ref={m.ref}): \"{_truncate(m.body, 120)}\""
+                    body_preview = _truncate(m.body, 120)
+                    text = f'{m.from_} → {m.to} (reply #{m.id} ref={m.ref}): "{body_preview}"'
                     actor = m.to
                 elif m.kind == "status":
                     icon = "·"
-                    text = f"{m.from_} status #{m.id}: \"{_truncate(m.body, 120)}\""
+                    text = f'{m.from_} status #{m.id}: "{_truncate(m.body, 120)}"'
                     actor = m.from_
                 elif m.kind == "delivery":
                     icon = "🏁"
-                    text = f"{m.from_} delivery #{m.id}: \"{_truncate(m.body, 120)}\""
+                    text = f'{m.from_} delivery #{m.id}: "{_truncate(m.body, 120)}"'
                     actor = m.from_
                 else:
                     continue
@@ -234,7 +244,7 @@ class TimelineRenderer:
                 evt = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            ts = datetime.fromtimestamp(base_mtime - 1 + i * 0.001, tz=timezone.utc).strftime(
+            ts = datetime.fromtimestamp(base_mtime - 1 + i * 0.001, tz=UTC).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             )
             etype = evt.get("type")
@@ -245,7 +255,9 @@ class TimelineRenderer:
         return entries
 
     @staticmethod
-    def _render_stream_event(evt: dict, etype: str, actor: str, task_id: str) -> Optional[tuple[str, str]]:
+    def _render_stream_event(
+        evt: dict[str, Any], etype: str, actor: str, task_id: str
+    ) -> tuple[str, str] | None:
         if etype == "system":
             model = evt.get("model") or evt.get("subtype") or "?"
             return "▶", f"세션 시작 ({task_id}, model={model})"
@@ -275,9 +287,7 @@ class TimelineRenderer:
                     is_err = c.get("is_error", False)
                     output = c.get("content", "")
                     if isinstance(output, list):
-                        output = " ".join(
-                            x.get("text", "") for x in output if isinstance(x, dict)
-                        )
+                        output = " ".join(x.get("text", "") for x in output if isinstance(x, dict))
                     return ("✗" if is_err else "↳"), f"tool result: {_truncate(str(output), 140)}"
             return None
         if etype == "result":
@@ -289,7 +299,7 @@ class TimelineRenderer:
         return None
 
     @staticmethod
-    def _render_tool_use(c: dict) -> tuple[str, str]:
+    def _render_tool_use(c: dict[str, Any]) -> tuple[str, str]:
         name = c.get("name", "?")
         inp = c.get("input", {}) or {}
         if name == "Bash":
@@ -305,5 +315,6 @@ class TimelineRenderer:
         return "🛠", f"{name}({_truncate(json.dumps(inp, ensure_ascii=False), 100)})"
 
 
-def actor_or_blank(e: dict) -> str:
-    return e.get("actor", "")
+def actor_or_blank(e: dict[str, Any]) -> str:
+    val = e.get("actor", "")
+    return str(val) if val is not None else ""

@@ -1,0 +1,8 @@
+# Runtime
+pydantic>=2.0
+
+# Dev / verification (project.md "자동 검증" 항목)
+pytest>=7.0
+pytest-cov>=4.0
+ruff>=0.1.0
+mypy>=1.0

@@ -2,19 +2,58 @@
 
 build_cli_command / stream_call / make_raw_llm_factory 와 codex 변형을 한 모듈에 모음.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
 import itertools
 import json as _json
+import logging
 import shutil
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
+from core import budget as _budget
+from core import llm as _llm
 from core.rate_limit import (
-    CallOutcome, RateLimitedCaller, classify_response, parse_retry_after,
+    CallOutcome,
+    RateLimitedCaller,
+    classify_response,
+    parse_retry_after,
 )
+
+_log = logging.getLogger(__name__)
+_call_counter = itertools.count(1)
+
+
+def _record_call_usage(
+    model: str,
+    tokens_in: int,
+    tokens_out: int,
+    usd: float | None,
+    source: str,
+) -> None:
+    """cli stream 결과를 모듈 누적기에 기록 (state/budget.json + events.jsonl).
+
+    ``usd`` 가 None 이면 budget 모듈이 가격표로 추정. 컨텍스트 메타 (agent/goal)
+    가 있으면 함께 첨부. 기록 성공 시 LLMClient 에게 알려서 중복 기록을 막는다.
+    """
+    meta = {**_llm.current_call_meta(), "source": source}
+    call_id = f"cli-{next(_call_counter):06d}"
+    try:
+        _budget.record_usage(
+            call_id=call_id,
+            model=model,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            usd=usd,
+            meta=meta,
+        )
+        _llm.mark_cli_recorded()
+    except (OSError, ValueError) as e:
+        _log.warning("budget.record_usage 실패 (무시): %s", e)
 
 
 def build_cli_command(model: str, system: str) -> list[str]:
@@ -26,11 +65,15 @@ def build_cli_command(model: str, system: str) -> list[str]:
     멤버 spawn 은 별도 경로(`lead/member.py`)에서 자체 allowedTools 를 지정.
     """
     return [
-        "claude", "-p",
-        "--output-format", "stream-json",
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
         "--verbose",
-        "--model", model,
-        "--append-system-prompt", system,
+        "--model",
+        model,
+        "--append-system-prompt",
+        system,
         "--disallowedTools",
         "Read,Write,Edit,Bash,Grep,Glob,WebFetch,WebSearch,Task,NotebookEdit,TodoWrite",
     ]
@@ -39,8 +82,9 @@ def build_cli_command(model: str, system: str) -> list[str]:
 def stream_call(
     cmd: list[str],
     user_input: str,
-    log_path,
+    log_path: Path | None,
     timeout: int,
+    model: str | None = None,
 ) -> CallOutcome:
     """claude CLI를 stream-json 모드로 돌리고, 한 줄씩 log_path에 적어가며 결과 추출.
 
@@ -62,11 +106,11 @@ def stream_call(
 
     timed_out = {"v": False}
 
-    def _kill():
+    def _kill() -> None:
         timed_out["v"] = True
         try:
             proc.kill()
-        except Exception:
+        except OSError:
             pass
 
     timer = threading.Timer(timeout, _kill)
@@ -76,6 +120,7 @@ def stream_call(
     final_text = ""
     tokens_in = 0
     tokens_out = 0
+    total_cost_usd: float | None = None
     is_error = False
     error_text = ""
 
@@ -102,11 +147,15 @@ def stream_call(
                 usage = evt.get("usage", {}) or {}
                 tokens_in = int(usage.get("input_tokens", 0) or 0)
                 tokens_out = int(usage.get("output_tokens", 0) or 0)
-                if tokens_in == 0 and tokens_out == 0:
-                    cost = float(evt.get("total_cost_usd", 0.0) or 0.0)
-                    if cost > 0:
-                        tokens_out = int(cost / 3 * 1_000_000 / 75)
-                        tokens_in = int(cost * 2 / 3 * 1_000_000 / 15)
+                cost_raw = evt.get("total_cost_usd")
+                if cost_raw is not None:
+                    try:
+                        total_cost_usd = float(cost_raw)
+                    except (TypeError, ValueError):
+                        total_cost_usd = None
+                if tokens_in == 0 and tokens_out == 0 and total_cost_usd:
+                    tokens_out = int(total_cost_usd / 3 * 1_000_000 / 75)
+                    tokens_in = int(total_cost_usd * 2 / 3 * 1_000_000 / 15)
         proc.wait()
     finally:
         timer.cancel()
@@ -130,34 +179,49 @@ def stream_call(
     if is_error:
         return CallOutcome(kind="other_error", text=error_text)
 
+    if model:
+        _record_call_usage(
+            model=model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            usd=total_cost_usd,
+            source="claude_cli",
+        )
+
     return CallOutcome(kind="ok", text=final_text, tokens_in=tokens_in, tokens_out=tokens_out)
 
 
-def make_raw_llm_factory(short_call_timeout: int = 300, llm_log_dir=None):
+def make_raw_llm_factory(
+    short_call_timeout: int = 300,
+    llm_log_dir: Path | str | None = None,
+) -> Callable[[str], Callable[[str, str], tuple[str, int, int]]]:
     """모델 받아 raw_caller 반환하는 factory.
 
     LLMClient에 주입. 호출 시점에 모델 결정 가능 (티어링).
     `llm_log_dir`이 주어지면 호출마다 NDJSON 스트림을 별도 파일에 기록.
     """
     counter = itertools.count(1)
+    log_dir: Path | None = None
     if llm_log_dir is not None:
-        llm_log_dir = Path(llm_log_dir)
-        llm_log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = Path(llm_log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
 
-    def make_for_model(model: str):
+    def make_for_model(model: str) -> Callable[[str, str], tuple[str, int, int]]:
         if not shutil.which("claude"):
+
             def stub(system: str, user: str) -> tuple[str, int, int]:
                 return (f"(claude CLI 미설치 — stub for {model})", 100, 50)
+
             return stub
 
         def raw_call(system: str, user: str) -> CallOutcome:
             cmd = build_cli_command(model, system)
-            log_path = None
-            if llm_log_dir is not None:
+            log_path: Path | None = None
+            if log_dir is not None:
                 ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
                 idx = next(counter)
-                log_path = llm_log_dir / f"{ts}-{idx:05d}-{model}.jsonl"
-            return stream_call(cmd, user, log_path, short_call_timeout)
+                log_path = log_dir / f"{ts}-{idx:05d}-{model}.jsonl"
+            return stream_call(cmd, user, log_path, short_call_timeout, model=model)
 
         return RateLimitedCaller(
             raw_call,
@@ -171,6 +235,7 @@ def make_raw_llm_factory(short_call_timeout: int = 300, llm_log_dir=None):
 
 # ---------- Codex CLI (OpenAI) ----------
 
+
 def build_codex_command(model: str) -> list[str]:
     """codex exec 명령. system prompt는 stdin 앞부분에 prepend (codex는 system/user 분리 없음).
 
@@ -179,10 +244,12 @@ def build_codex_command(model: str) -> list[str]:
     -s read-only: 샌드박스 (파일 수정 금지, LLM 발언만 받음 — debate panel용)
     """
     cmd = [
-        "codex", "exec",
+        "codex",
+        "exec",
         "--json",
         "--skip-git-repo-check",
-        "-s", "read-only",
+        "-s",
+        "read-only",
         "-",  # stdin에서 프롬프트 읽음
     ]
     if model:
@@ -194,8 +261,9 @@ def codex_stream_call(
     cmd: list[str],
     system: str,
     user: str,
-    log_path,
+    log_path: Path | None,
     timeout: int,
+    model: str | None = None,
 ) -> CallOutcome:
     """codex CLI를 JSONL 모드로 돌리고 결과 추출.
 
@@ -223,11 +291,11 @@ def codex_stream_call(
 
     timed_out = {"v": False}
 
-    def _kill():
+    def _kill() -> None:
         timed_out["v"] = True
         try:
             proc.kill()
-        except Exception:
+        except OSError:
             pass
 
     timer = threading.Timer(timeout, _kill)
@@ -293,35 +361,61 @@ def codex_stream_call(
     if not final_text:
         return CallOutcome(kind="other_error", text="codex: empty response")
 
+    if model:
+        # codex CLI 는 USD 를 직접 알려주지 않음 → 가격표 추정에 맡김 (usd=None).
+        _record_call_usage(
+            model=model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            usd=None,
+            source="codex_cli",
+        )
+
     return CallOutcome(
-        kind="ok", text=final_text, tokens_in=tokens_in, tokens_out=tokens_out,
+        kind="ok",
+        text=final_text,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
     )
 
 
-def make_codex_raw_factory(short_call_timeout: int = 600, llm_log_dir=None):
+def make_codex_raw_factory(
+    short_call_timeout: int = 600,
+    llm_log_dir: Path | str | None = None,
+) -> Callable[[str], Callable[[str, str], tuple[str, int, int]]]:
     """codex 백엔드 raw_caller factory. claude factory와 같은 시그니처.
 
     timeout은 600s 기본 (codex는 reasoning step 때문에 더 오래 걸릴 수 있음).
     """
     counter = itertools.count(1)
+    log_dir: Path | None = None
     if llm_log_dir is not None:
-        llm_log_dir = Path(llm_log_dir)
-        llm_log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = Path(llm_log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
 
-    def make_for_model(model: str):
+    def make_for_model(model: str) -> Callable[[str, str], tuple[str, int, int]]:
         if not shutil.which("codex"):
+
             def stub(system: str, user: str) -> tuple[str, int, int]:
                 return (f"(codex CLI 미설치 — stub for {model})", 100, 50)
+
             return stub
 
         def raw_call(system: str, user: str) -> CallOutcome:
             cmd = build_codex_command(model)
-            log_path = None
-            if llm_log_dir is not None:
+            log_path: Path | None = None
+            if log_dir is not None:
                 ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
                 idx = next(counter)
-                log_path = llm_log_dir / f"{ts}-{idx:05d}-codex-{model or 'default'}.jsonl"
-            return codex_stream_call(cmd, system, user, log_path, short_call_timeout)
+                log_path = log_dir / f"{ts}-{idx:05d}-codex-{model or 'default'}.jsonl"
+            return codex_stream_call(
+                cmd,
+                system,
+                user,
+                log_path,
+                short_call_timeout,
+                model=model,
+            )
 
         return RateLimitedCaller(
             raw_call,

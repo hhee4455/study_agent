@@ -13,6 +13,7 @@
 
 stdlib만 사용 (psutil 의존성 없음). macOS는 vm_stat, linux는 /proc/meminfo.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,16 +21,17 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any
 
 
 @dataclass
 class HealthThresholds:
-    min_free_disk_mb: int = 1024     # 1 GB 미만이면 트리거
-    min_free_mem_mb: int = 512       # 512 MB 미만이면 트리거
-    pause_seconds: float = 60.0      # 트리거 시 sleep
+    min_free_disk_mb: int = 1024  # 1 GB 미만이면 트리거
+    min_free_mem_mb: int = 512  # 512 MB 미만이면 트리거
+    pause_seconds: float = 60.0  # 트리거 시 sleep
     max_consecutive_pauses: int = 5  # 이만큼 연속 미회복 → HealthExhausted
 
 
@@ -62,9 +64,9 @@ class HealthMonitor:
         self,
         state_dir: Path,
         workspace: Path,
-        thresholds: Optional[HealthThresholds] = None,
+        thresholds: HealthThresholds | None = None,
         sleep: Callable[[float], None] = time.sleep,
-        on_event: Optional[Callable[[str], None]] = None,
+        on_event: Callable[[str], None] | None = None,
     ):
         self.state_dir = state_dir
         self.workspace = workspace
@@ -83,7 +85,7 @@ class HealthMonitor:
             workspace_dir_mb=_dir_size_mb(self.workspace),
         )
 
-    def check_and_remediate(self, remediator: Callable[[], dict]) -> None:
+    def check_and_remediate(self, remediator: Callable[[], dict[str, Any]]) -> None:
         """건강 체크 + 비정상 시 회복 시도.
 
         정상이면 즉시 return. 비정상이면 remediator 호출 + sleep + 재측정.
@@ -111,14 +113,11 @@ class HealthMonitor:
 
         snap2 = self.snapshot()
         reasons2 = snap2.reasons(self.t)
-        self._record_incident(
-            "after", ",".join(reasons2) or "ok", snap2, remediation=result
-        )
+        self._record_incident("after", ",".join(reasons2) or "ok", snap2, remediation=result)
 
         if not reasons2:
             self.on_event(
-                f"  ✅ 회복 (free_disk={snap2.free_disk_mb}MB, "
-                f"free_mem={snap2.free_mem_mb}MB)"
+                f"  ✅ 회복 (free_disk={snap2.free_disk_mb}MB, free_mem={snap2.free_mem_mb}MB)"
             )
             self.consecutive_pauses = 0
             return
@@ -130,8 +129,7 @@ class HealthMonitor:
         )
         if self.consecutive_pauses >= self.t.max_consecutive_pauses:
             raise HealthExhausted(
-                f"자원 부족 회복 실패 ({','.join(reasons2)}). "
-                f"원인 로그: {self.incidents_path}"
+                f"자원 부족 회복 실패 ({','.join(reasons2)}). 원인 로그: {self.incidents_path}"
             )
 
     def _record_incident(
@@ -139,7 +137,7 @@ class HealthMonitor:
         phase: str,
         reason: str,
         snap: HealthSnapshot,
-        remediation: Optional[dict],
+        remediation: dict[str, Any] | None,
     ) -> None:
         entry = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -156,6 +154,7 @@ class HealthMonitor:
 
 
 # ---- 측정 함수 ----
+
 
 def _free_disk_mb(path: Path) -> int:
     try:
@@ -178,9 +177,7 @@ def _free_mem_mb() -> int:
 
     if sys.platform == "darwin":
         try:
-            proc = subprocess.run(
-                ["vm_stat"], capture_output=True, text=True, timeout=5
-            )
+            proc = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return -1
         if proc.returncode != 0:
@@ -204,7 +201,7 @@ def _free_mem_mb() -> int:
                 "Pages purgeable:",
             ):
                 if line.startswith(prefix):
-                    num = line[len(prefix):].strip().rstrip(".")
+                    num = line[len(prefix) :].strip().rstrip(".")
                     try:
                         free_pages += int(num)
                     except ValueError:
@@ -212,7 +209,7 @@ def _free_mem_mb() -> int:
                     break
         return free_pages * page_size // (1024 * 1024)
 
-    return -1
+    return -1  # type: ignore[unreachable]
 
 
 def _dir_size_mb(path: Path) -> int:

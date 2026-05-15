@@ -1,0 +1,56 @@
+[project]
+name = "agent-system"
+version = "0.1.0"
+description = "Team-Lead / Team-Member agent system."
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".archive", "**/.archive/**"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # 광범위한 boundary catch 는 의도된 패턴이라 SIM105 일괄 적용 부적합.
+    "SIM105",
+    # 테스트의 `pytest.raises(Exception)` 은 허용 (구체 타입을 강요하면 회귀 위험).
+    "B017",
+    # 한국어 docstring/문자열에서 흔히 쓰이는 유니코드(은닉 문자 0)는 의도된 사용.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "E501",   # 테스트 fixture 의 긴 문자열 허용
+    "B007",   # 루프 카운터 unused 허용
+    "F841",   # 디버그용 임시 변수 허용
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent_system", "core", "lead", "agents"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+ignore_missing_imports = true
+exclude = ["tests/", "\\.archive/"]
+# 너무 빡빡한 옵션은 풀어둔다 — 시드 코드의 dict[str, Any] 사용량이 크다.
+disallow_any_generics = false
+disallow_subclassing_any = false
+warn_return_any = false
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = ["-ra", "-q"]

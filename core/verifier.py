@@ -8,14 +8,14 @@
 llm_judge는 의도적으로 빠짐 — self-evaluation은 신뢰 불가.
 정말 필요하면 호출자가 별도로 처리.
 """
+
 from __future__ import annotations
 
 import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
-
+from typing import Any, Literal
 
 CheckKind = Literal["shell", "file_exists", "file_contains"]
 
@@ -38,10 +38,10 @@ SHELL_DENY_PATTERNS = [
     r"\bchown\b",
     r"\bdd\s",
     r"\bmkfs\b",
-    r"\$\(",        # command substitution
-    r"`[^`]*`",     # backtick substitution
+    r"\$\(",  # command substitution
+    r"`[^`]*`",  # backtick substitution
     r"\|\s*(sh|bash|zsh|python|ruby|perl)\b",  # pipe to interpreter
-    r"\bnc\b\s",    # netcat
+    r"\bnc\b\s",  # netcat
     r"\bssh\b\s",
     r"\.\./\.\./",  # 2단 이상 상위 디렉토리 (../까지는 file_exists 등에서 자주 쓰이므로 허용)
     r">\s*/dev/(sd|nvme|disk)",  # 디스크 raw write
@@ -52,16 +52,39 @@ SHELL_DENY_PATTERNS = [
 # 허용 명령 prefix (whitelist). shell command가 이 중 하나로 시작해야 통과.
 # pipe / && / ;로 연결된 경우 각 segment 첫 토큰 모두 검사.
 SHELL_ALLOW_PREFIXES = {
-    "test", "[", "ls", "cat", "head", "tail", "wc", "grep", "find",
-    "echo", "true", "false",
-    "python", "python3", "pytest",
-    "node", "npm", "npx",
-    "ruff", "mypy", "black",
+    "test",
+    "[",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "find",
+    "echo",
+    "true",
+    "false",
+    "python",
+    "python3",
+    "pytest",
+    "node",
+    "npm",
+    "npx",
+    "ruff",
+    "mypy",
+    "black",
     "git",
-    "bash", "sh",  # 단, deny 패턴이 우선 적용됨
-    "diff", "cmp", "stat", "file",
-    "awk", "sed",  # 읽기 전용 사용이 일반적
-    "sort", "uniq", "tr",
+    "bash",
+    "sh",  # 단, deny 패턴이 우선 적용됨
+    "diff",
+    "cmp",
+    "stat",
+    "file",
+    "awk",
+    "sed",  # 읽기 전용 사용이 일반적
+    "sort",
+    "uniq",
+    "tr",
     "make",
 }
 
@@ -77,6 +100,7 @@ def shell_sanity_check(command: str) -> tuple[bool, str]:
 
     # 0) 호스트 민감 경로(`.ssh`, `.env` 등) — P5 토론 결정 (2026-05-13)
     from core.path_guard import host_path_blocked
+
     bad, reason = host_path_blocked(cmd)
     if bad:
         return False, reason
@@ -116,7 +140,7 @@ class Check:
     min_bytes: int = 0  # file_exists에서 빈 파일 거부용
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Check":
+    def from_dict(cls, d: dict[str, Any]) -> Check:
         """brief 의 verification_checks dict 표현에서 생성. 알 수 없는 키는 무시."""
         valid = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in d.items() if k in valid})
@@ -155,7 +179,7 @@ class Verifier:
                 return self._exists(c)
             if c.kind == "file_contains":
                 return self._contains(c)
-            return CheckResult(c.name, False, f"알 수 없는 kind: {c.kind}")
+            return CheckResult(c.name, False, f"알 수 없는 kind: {c.kind}")  # type: ignore[unreachable]
         except Exception as e:  # 어떤 검증 실패도 시스템을 멈추지 않음
             return CheckResult(c.name, False, f"검증 중 예외: {e!r}")
 
@@ -165,8 +189,7 @@ class Verifier:
         ok, reason = shell_sanity_check(c.command)
         if not ok:
             return CheckResult(
-                c.name, False,
-                f"sanity check 거부: {reason} (command={c.command[:80]!r})"
+                c.name, False, f"sanity check 거부: {reason} (command={c.command[:80]!r})"
             )
         ws = self.workspace.resolve()
         if c.cwd:
@@ -177,9 +200,7 @@ class Verifier:
             try:
                 cwd.relative_to(ws)
             except ValueError:
-                return CheckResult(
-                    c.name, False, f"cwd workspace 외부: {cwd}"
-                )
+                return CheckResult(c.name, False, f"cwd workspace 외부: {cwd}")
         else:
             cwd = ws
         try:
@@ -205,6 +226,7 @@ class Verifier:
         if not c.path:
             return CheckResult(c.name, False, "path 누락")
         from core.path_guard import PathEscape, resolve_within
+
         try:
             target = resolve_within(c.path, root=self.workspace)
         except PathEscape as e:
@@ -214,15 +236,14 @@ class Verifier:
         if c.min_bytes > 0 and target.is_file():
             size = target.stat().st_size
             if size < c.min_bytes:
-                return CheckResult(
-                    c.name, False, f"{c.path} 너무 작음 ({size}B < {c.min_bytes}B)"
-                )
+                return CheckResult(c.name, False, f"{c.path} 너무 작음 ({size}B < {c.min_bytes}B)")
         return CheckResult(c.name, True, f"{c.path} 존재")
 
     def _contains(self, c: Check) -> CheckResult:
         if not (c.path and c.pattern):
             return CheckResult(c.name, False, "path/pattern 누락")
         from core.path_guard import PathEscape, resolve_within
+
         try:
             target = resolve_within(c.path, root=self.workspace)
         except PathEscape as e:

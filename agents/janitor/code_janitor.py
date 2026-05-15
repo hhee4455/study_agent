@@ -13,6 +13,7 @@
   - `tests/test_*.py` (테스트는 자체 정당화)
   - 7일 이내 mtime (최근 작성된 코드)
 """
+
 from __future__ import annotations
 
 import ast
@@ -20,14 +21,20 @@ import re
 import shutil
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
-
 
 # 항상 보호 (사용 안 해도 지우지 않음)
 DEFAULT_PROTECTED_NAMES = {"__main__.py", "__init__.py", "setup.py", "conftest.py"}
-DEFAULT_PROTECTED_DIRS = {".git", ".venv", "venv", "__pycache__", ".archive", "node_modules", ".harness"}
+DEFAULT_PROTECTED_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".archive",
+    "node_modules",
+    ".harness",
+}
 
 # 최근에 만든 코드는 건드리지 않음 (초 단위)
 RECENCY_GRACE_SEC = 7 * 24 * 3600  # 7일
@@ -37,9 +44,9 @@ RECENCY_GRACE_SEC = 7 * 24 * 3600  # 7일
 class FileUsage:
     path: Path
     rel: str
-    module_name: str         # foo/bar/baz.py → foo.bar.baz
+    module_name: str  # foo/bar/baz.py → foo.bar.baz
     top_level_names: list[str] = field(default_factory=list)  # def/class top-level
-    imported_by: list[str] = field(default_factory=list)      # rel paths of importers
+    imported_by: list[str] = field(default_factory=list)  # rel paths of importers
     name_refs: dict[str, list[str]] = field(default_factory=dict)  # name → importer rels
 
 
@@ -49,7 +56,7 @@ class JanitorReport:
     archived: list[str] = field(default_factory=list)
     archived_dead_dirs: list[str] = field(default_factory=list)  # 빈 placeholder 디렉토리 archive
     kept: list[str] = field(default_factory=list)
-    archive_dir: Optional[Path] = None
+    archive_dir: Path | None = None
     skipped_recent: list[str] = field(default_factory=list)
     skipped_protected: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -67,8 +74,8 @@ class CodeJanitor:
         self,
         workspace: Path,
         *,
-        protected_files: Optional[set[str]] = None,
-        entrypoints: Optional[list[str]] = None,
+        protected_files: set[str] | None = None,
+        entrypoints: list[str] | None = None,
         dry_run: bool = False,
         recency_grace_sec: int = RECENCY_GRACE_SEC,
     ):
@@ -127,7 +134,7 @@ class CodeJanitor:
             return report
 
         if not self.dry_run:
-            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
             archive_root = self.workspace / ".archive" / ts
             archive_root.mkdir(parents=True, exist_ok=True)
             report.archive_dir = archive_root
@@ -180,7 +187,11 @@ class CodeJanitor:
                         names.append(node.name)
                 elif isinstance(node, ast.Assign):
                     for tgt in node.targets:
-                        if isinstance(tgt, ast.Name) and not tgt.id.startswith("_") and tgt.id.isupper():
+                        if (
+                            isinstance(tgt, ast.Name)
+                            and not tgt.id.startswith("_")
+                            and tgt.id.isupper()
+                        ):
                             names.append(tgt.id)
         except (SyntaxError, OSError):
             pass
@@ -296,10 +307,12 @@ class CodeJanitor:
     def _write_report_md(
         archive_root: Path,
         unused: list[tuple[Path, FileUsage]],
-        dead_dirs: list[Path] = (),
+        dead_dirs: list[Path] | None = None,
     ) -> None:
+        if dead_dirs is None:
+            dead_dirs = []
         lines = [
-            f"# Code-janitor archive — {datetime.now(timezone.utc).isoformat()}",
+            f"# Code-janitor archive — {datetime.now(UTC).isoformat()}",
             "",
             "이 폴더의 파일들은 정적 분석으로 import/참조가 발견되지 않아 이동되었음.",
             "",
@@ -309,8 +322,9 @@ class CodeJanitor:
             "## Archived files",
         ]
         if unused:
-            for f, u in unused:
-                lines.append(f"- `{u.rel}` (module: `{u.module_name}`, top-level: {u.top_level_names or '없음'})")
+            for _f, u in unused:
+                top_names = u.top_level_names or "없음"
+                lines.append(f"- `{u.rel}` (module: `{u.module_name}`, top-level: {top_names})")
         else:
             lines.append("- (없음)")
 
@@ -322,6 +336,7 @@ class CodeJanitor:
         lines += [
             "",
             "## 보호 화이트리스트 추가하려면",
-            "CodeJanitor 호출 시 `protected_files`(basename) 또는 `entrypoints`(rel path) 인자에 명시.",
+            "CodeJanitor 호출 시 `protected_files`(basename) 또는 "
+            "`entrypoints`(rel path) 인자에 명시.",
         ]
         (archive_root / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

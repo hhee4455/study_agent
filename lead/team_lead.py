@@ -13,32 +13,89 @@ plan.md 형식:
     - [ ] G-foo: bootstrap python project
     - [x] G-bar: write README  (assigned: M001)
 """
+
 from __future__ import annotations
 
+import ast
+import asyncio
 import json
 import re
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
+from core.auto_merge import try_auto_merge
 from core.budget import BudgetExceeded, BudgetManager
 from core.health import HealthMonitor
-from core.llm import LLMClient
+from core.llm import MODEL_OPUS, MODEL_SONNET, LLMClient
 from core.rate_limit import RateLimitExhausted
+from core.schemas import (
+    PLAN_BACKUP_KEEP,
+    PlanSchema,
+    ValidationFailure,
+    validate_decomposer_output,
+)
+from core.schemas import (
+    call_decomposer_with_validation as _call_decomposer_with_validation,
+)
+from core.schemas import (
+    prune_plan_backups as _prune_plan_backups,
+)
+from core.similarity import (
+    GATE_ACTION_BYPASS,
+    GATE_ACTION_PASS,
+    GATE_ACTION_REFINE,
+    GATE_ACTION_SKIP,
+    decide_gate,
+)
 from core.verifier import Check, Verifier
-
-from lead.mailbox import Message, append_message, parse_messages, scan_new
-from lead.member import HireBrief, MemberSpawner, SpawnResult
+from lead.mailbox import (
+    Message,
+    append_message,
+    build_refine_message,
+    detect_terminal_status,
+    parse_messages,
+    scan_new,
+)
+from lead.member import (
+    HireBrief,
+    MemberSpawner,
+    SpawnResult,
+    is_pid_alive,
+    read_pid_file,
+)
 from lead.prompts import render_split
 from lead.registry import AgentRegistry
 from lead.timeline import TimelineRenderer
 from lead.workspace import WorkspaceMerger
 
-
 # Plan goal 라인 형식
-GOAL_LINE_RE = re.compile(r"^- \[(?P<done>[ xX])\] (?P<id>G-[A-Za-z0-9_-]+): (?P<title>.+?)(?:\s+\(assigned: (?P<assigned>[A-Za-z0-9_-]+)\))?\s*$")
+GOAL_LINE_RE = re.compile(
+    r"^- \[(?P<done>[ xX])\] (?P<id>G-[A-Za-z0-9_-]+): (?P<title>.+?)"
+    r"(?:\s+\(assigned: (?P<assigned>[A-Za-z0-9_-]+)\))?\s*$"
+)
+
+# Decomposer (hire-brief) 가 강제하는 sub-goal 분류 라벨.
+# 예: kind="new" (신규 파일/모듈), kind="refine" (시드 정련), kind="extend" (기능 확장),
+# kind="remove" (제거/정리). 누락/오타는 코드 차원에서 거부 후 재시도.
+_VALID_BRIEF_KINDS: tuple[str, ...] = ("new", "refine", "extend", "remove")
+_BRIEF_VALIDATION_MAX_ATTEMPTS = 3
+_MISSION_LABEL_RE = re.compile(r"^\s*\[kind=(?P<k>[a-zA-Z]+)\]\s*")
+
+
+def _ensure_mission_label(mission: str, kind: str) -> str:
+    """mission 첫 문장이 `[kind=KIND] ...` prefix 로 시작하도록 보정.
+
+    이미 라벨이 있고 일치하면 그대로 반환.
+    """
+    m = _MISSION_LABEL_RE.match(mission)
+    if m and m.group("k").lower() == kind:
+        return mission
+    body = mission[m.end() :] if m else mission.lstrip()
+    return f"[kind={kind}] {body}"
+
 
 # 단일 멤버 재spawn 안전 상한 (무한 핑퐁 방지용 마지막 방어선; budget이 1차 차단).
 RESUME_SAFETY_CAP = 20
@@ -54,6 +111,23 @@ FINAL_VERIFICATION_MAX_ITERATIONS = 5
 # pytest 실행 타임아웃 (초)
 FINAL_VERIFICATION_TIMEOUT_SEC = 900
 
+# 충돌 토론 동시성 한도 — 한 멤버 산출물의 충돌 파일 N개를 N개의 토론으로 동시에 처리.
+# claude/codex CLI 외부 호출이 IO-bound 이므로 asyncio.Semaphore 로 충분.
+DEBATE_MAX_PARALLEL = 4
+# 한 충돌 1단계(sonnet) 토론 타임아웃 — 도달 시 opus escalate.
+DEBATE_ROUND_TIMEOUT_SEC = 240
+# 2단계(opus) escalate 타임아웃 — sonnet 보다 더 너그럽게.
+DEBATE_ESCALATE_TIMEOUT_SEC = 360
+
+# seed 유사도 게이트 — 같은 멤버에 refine 메시지가 누적 N회 보내졌으면 게이트 우회
+# (= debate 로 회부). 무한 refine 핑퐁 방지용.
+SEED_GATE_MAX_RESPAWNS = 2
+
+# Goal 분할 마커. goal id 안에 들어있으면 "이미 분할된 sub-goal" 로 보고 다시 분할하지 않음.
+# 한 멤버 세션의 max_turns 안에 못 끝나는 큰 goal 이 FAILED 로 떨어지면 첫 실패에
+# 이 마커가 붙은 sub-goal 2개로 plan 을 갈아끼우고 재hire 흐름에 맡긴다.
+GOAL_SPLIT_MARKER = "-split-"
+
 
 @dataclass
 class Goal:
@@ -61,6 +135,102 @@ class Goal:
     title: str
     done: bool = False
     assigned: str = ""
+
+
+@dataclass
+class ConflictQueueItem:
+    """G-011: 재시작 시 conflicts/*.md 에서 재로드되는 미처리 충돌 항목.
+
+    `agent_id`: 충돌을 일으킨 멤버, `files`: 충돌 파일 상대경로 목록, `path`:
+    원본 conflict 마크다운 (정리 후 unlink 용).
+    """
+
+    agent_id: str
+    files: list[str]
+    path: Path
+
+
+# 멤버 dir 이름 패턴 (`M001`, `M042` …). conflict 파일/agent_id 추출에 재사용.
+_AGENT_ID_RE = re.compile(r"^M\d+")
+
+# conflict 마크다운의 "## 충돌 파일" 섹션에서 ``- `rel` —`` 형태 라인 추출.
+_CONFLICT_FILE_LINE_RE = re.compile(r"^-\s+`([^`]+)`")
+
+
+def parse_conflict_file(path: Path) -> ConflictQueueItem | None:
+    """conflicts/*.md 한 개를 ConflictQueueItem 으로 변환. 빈 충돌이면 None.
+
+    파싱 규칙:
+      - agent_id: 파일명 prefix 가 `M\\d+` 인 것에서 추출 (예: `M003-20260515.md` → M003).
+      - files: "## 충돌 파일" 다음의 ``- `rel` — …`` 패턴.
+      - 다음 헤더 (`## …`) 만나면 섹션 종료.
+    """
+    name_match = _AGENT_ID_RE.match(path.name)
+    if not name_match:
+        return None
+    agent_id = name_match.group(0)
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    files: list[str] = []
+    in_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            if in_section:
+                break
+            in_section = "충돌 파일" in stripped
+            continue
+        if not in_section:
+            continue
+        m = _CONFLICT_FILE_LINE_RE.match(stripped)
+        if m:
+            files.append(m.group(1))
+
+    if not files:
+        return None
+    return ConflictQueueItem(agent_id=agent_id, files=files, path=path)
+
+
+def mailbox_last_member_message(mailbox_path: Path, agent_id: str) -> Message | None:
+    """mailbox.md 에서 `from_=agent_id` 인 마지막 메시지 반환. 없으면 None.
+
+    restore_state 가 lead 재시작 시 멤버 마지막 동작 (delivery/question/status) 을
+    한 줄로 분류하기 위한 헬퍼.
+    """
+    msgs = parse_messages(mailbox_path)
+    for m in reversed(msgs):
+        if m.from_ == agent_id:
+            return m
+    return None
+
+
+def classify_mailbox_state(msg: Message | None) -> str:
+    """마지막 멤버 메시지 → 상태 라벨.
+
+    - delivery   → "DONE"
+    - question   → "WAITING"
+    - status + [STATUS:FAILED] body → "FAILED"
+    - status (그 외)               → "RUNNING"
+    - None                          → "UNKNOWN"
+    """
+    if msg is None:
+        return "UNKNOWN"
+    if msg.kind == "delivery":
+        return "DONE"
+    if msg.kind == "question":
+        return "WAITING"
+    if msg.kind == "status":
+        token = detect_terminal_status(msg.body)
+        if token == "FAILED":
+            return "FAILED"
+        if token == "DONE":
+            return "DONE"
+        return "RUNNING"
+    return "RUNNING"
 
 
 def parse_plan(plan_md: Path) -> list[Goal]:
@@ -72,12 +242,14 @@ def parse_plan(plan_md: Path) -> list[Goal]:
         m = GOAL_LINE_RE.match(line.strip())
         if not m:
             continue
-        goals.append(Goal(
-            id=m.group("id"),
-            title=m.group("title").strip(),
-            done=m.group("done").lower() == "x",
-            assigned=m.group("assigned") or "",
-        ))
+        goals.append(
+            Goal(
+                id=m.group("id"),
+                title=m.group("title").strip(),
+                done=m.group("done").lower() == "x",
+                assigned=m.group("assigned") or "",
+            )
+        )
     return goals
 
 
@@ -95,15 +267,15 @@ class TeamLead:
         self,
         spec: str,
         spec_name: str,
-        state_dir: Path,              # <state_dir>/ — session_logs/ 위치 결정
-        lead_state_dir: Path,         # <state_dir>/lead/
-        agents_root: Path,            # <state_dir>/agents/
-        session_logs_root: Path,      # <state_dir>/session_logs/
-        ws_root: Path,                # ws/members/ — 멤버 격리 ws 들의 부모
-        ws_main: Path,                # ws/main/ (= args.workspace) — 머지 결과
+        state_dir: Path,  # <state_dir>/ — session_logs/ 위치 결정
+        lead_state_dir: Path,  # <state_dir>/lead/
+        agents_root: Path,  # <state_dir>/agents/
+        session_logs_root: Path,  # <state_dir>/session_logs/
+        ws_root: Path,  # ws/members/ — 멤버 격리 ws 들의 부모
+        ws_main: Path,  # ws/main/ (= args.workspace) — 머지 결과
         llm: LLMClient,
         budget: BudgetManager,
-        health: Optional[HealthMonitor] = None,
+        health: HealthMonitor | None = None,
         default_model: str = "opus",
         enable_evaluator: bool = False,
         max_parallel: int = 3,
@@ -137,14 +309,21 @@ class TeamLead:
 
         # 병렬 spawn: agent_id → 진행 중인 spawn future.
         # SessionManager는 각자 다른 cwd/log_dir 쓰니 동시 호출 OK.
-        self._executor: Optional[ThreadPoolExecutor] = None
-        self._pending: dict[str, Future] = {}
+        self._executor: ThreadPoolExecutor | None = None
+        self._pending: dict[str, Future[Any]] = {}
         # 멤버 브리프 캐시 (resume 시 재구성용; system_prompt.md만으론 부족한 미션 등 보존)
         self._briefs: dict[str, HireBrief] = {}
         # janitor 판단 카운터 (hire 횟수 누적)
         self._hires_since_janitor = 0
         # 최종 점검 (pytest) 반복 카운터 — 한도 도달하면 사람 결정 코드 (5) 반환
         self._final_verification_count = 0
+        # G-011: 재시작 복구. restore_state 가 PID 살아있는 멤버를 _reattached 에 추가.
+        # _recover_zombies 는 _reattached 에 있는 멤버를 건너뜀 (실제 in-flight 자식).
+        self._reattached: set[str] = set()
+        # G-011: 미처리 충돌 파일 큐. restore_state 가 conflicts/*.md 글롭하여 채움.
+        self.conflict_queue: list[ConflictQueueItem] = []
+        # G-011: SIGTERM/SIGINT 핸들러가 set. run 루프가 polling 으로 감지 → drain.
+        self._shutdown_requested: bool = False
 
     # ---------- 진입점 ----------
 
@@ -154,33 +333,29 @@ class TeamLead:
         self._log(f"팀장 시작 | spec={self.spec_name} | max_parallel={self.max_parallel}")
         self._log("=" * 60)
 
-        # 이전 run 이 죽어 zombie 가 된 RUNNING 멤버 복구 (delivery 있으면 DONE 으로, 없으면 FAILED + plan 에서 unassign)
+        # 이전 run 이 죽어 zombie 가 된 RUNNING 멤버 복구
+        # (delivery 있으면 DONE 으로, 없으면 FAILED + plan 에서 unassign)
         self._recover_zombies()
 
         # --replan: 기존 plan.md 를 timestamp 붙여 백업하고 spec 기반 재분해.
         # "main 점진 강화" 흐름에서 새 spec 으로 다시 plan 분해할 때 사용.
         if self.replan and self.plan_md.exists():
-            archive = self.plan_md.with_name(
-                f"plan.replaced-{int(time.time())}.md"
-            )
+            archive = self.plan_md.with_name(f"plan.replaced-{int(time.time())}.md")
             self.plan_md.rename(archive)
+            _prune_plan_backups(self.lead_state_dir, keep=PLAN_BACKUP_KEEP)
             self._log(f"  📋 --replan: 기존 plan → {archive.name} 으로 백업, 재분해 진행")
-            self.timeline.emit("lead", "plan_update",
-                               note=f"--replan: 기존 plan archive → {archive.name}")
+            self.timeline.emit(
+                "lead", "plan_update", note=f"--replan: 기존 plan archive → {archive.name}"
+            )
 
         if not self.plan_md.exists():
             self._initial_plan()
 
         consecutive_no_progress = 0
-        with ThreadPoolExecutor(max_workers=self.max_parallel,
-                                 thread_name_prefix="spawn") as ex:
+        with ThreadPoolExecutor(max_workers=self.max_parallel, thread_name_prefix="spawn") as ex:
             self._executor = ex
             try:
-                while (
-                    self.budget.can_continue()
-                    or self._pending
-                    or self._has_unverified_done()
-                ):
+                while self.budget.can_continue() or self._pending or self._has_unverified_done():
                     try:
                         progressed = self._tick()
                     except BudgetExceeded:
@@ -207,10 +382,12 @@ class TeamLead:
                         self._final_verification_count += 1
                         if self._final_verification_count >= FINAL_VERIFICATION_MAX_ITERATIONS:
                             self._log(
-                                f"\n⚠️ 최종 점검 {self._final_verification_count}회 실패 — 사람 결정 필요"
+                                f"\n⚠️ 최종 점검 {self._final_verification_count}회 실패 — "
+                                "사람 결정 필요"
                             )
                             self.timeline.emit(
-                                "lead", "final_verification_exhausted",
+                                "lead",
+                                "final_verification_exhausted",
                                 iterations=self._final_verification_count,
                             )
                             self.timeline.render()
@@ -221,8 +398,10 @@ class TeamLead:
                             f"실패 분석 → fix goal {added}개 추가, 재진행"
                         )
                         self.timeline.emit(
-                            "lead", "final_verification_fail",
-                            iterations=self._final_verification_count, added_goals=added,
+                            "lead",
+                            "final_verification_fail",
+                            iterations=self._final_verification_count,
+                            added_goals=added,
                         )
                         # 진행률 리셋 — 새 goal 들이 hire 될 시간 줌
                         consecutive_no_progress = 0
@@ -233,8 +412,9 @@ class TeamLead:
                         if consecutive_no_progress >= NO_PROGRESS_CAP and not self._pending:
                             summary = self._registry_summary()
                             self._log(f"⏸️  {NO_PROGRESS_CAP}회 연속 무진행. registry={summary}")
-                            self.timeline.emit("lead", "error",
-                                               error=f"no progress (registry={summary})")
+                            self.timeline.emit(
+                                "lead", "error", error=f"no progress (registry={summary})"
+                            )
                             return 3
                     else:
                         consecutive_no_progress = 0
@@ -286,8 +466,10 @@ class TeamLead:
                 src.rename(dst)
                 self._log(f"  🗑️  orphan {orphan_id} → orphan_agents/ 격리 (registry 없음)")
                 self.timeline.emit(
-                    "lead", "orphan_archived",
-                    agent_id=orphan_id, archive=str(dst),
+                    "lead",
+                    "orphan_archived",
+                    agent_id=orphan_id,
+                    archive=str(dst),
                 )
                 progressed = True
             except OSError as e:
@@ -336,18 +518,23 @@ class TeamLead:
         timeout 도달 시 (False, 'timeout') 반환.
         """
         import subprocess
+
         self._log("=" * 60)
-        self._log(f"🔍 팀장 최종 점검 — pytest 전체 실행 (반복 #{self._final_verification_count + 1})")
+        self._log(
+            f"🔍 팀장 최종 점검 — pytest 전체 실행 (반복 #{self._final_verification_count + 1})"
+        )
         self._log("=" * 60)
 
         venv_py = self.ws_main / ".venv" / "bin" / "python"
         py_cmd = [str(venv_py)] if venv_py.exists() else ["python3"]
-        cmd = py_cmd + ["-m", "pytest", "--tb=short", "-q", "--no-header"]
+        cmd = [*py_cmd, "-m", "pytest", "--tb=short", "-q", "--no-header"]
 
         try:
             result = subprocess.run(
-                cmd, cwd=self.ws_main,
-                capture_output=True, text=True,
+                cmd,
+                cwd=self.ws_main,
+                capture_output=True,
+                text=True,
                 timeout=FINAL_VERIFICATION_TIMEOUT_SEC,
             )
         except subprocess.TimeoutExpired:
@@ -392,7 +579,7 @@ class TeamLead:
 
         m = re.search(r"\[.*\]", raw, re.DOTALL)
         if not m:
-            self._log(f"  ⚠ LLM 응답에 JSON 배열 없음")
+            self._log("  ⚠ LLM 응답에 JSON 배열 없음")
             return 0
         try:
             new_goals = json.loads(m.group(0))
@@ -418,8 +605,9 @@ class TeamLead:
             added += 1
         if added:
             render_plan(self.plan_md, "Plan", goals)
-            self.timeline.emit("lead", "plan_update",
-                               note=f"final verification 실패 → fix goal {added}개 추가")
+            self.timeline.emit(
+                "lead", "plan_update", note=f"final verification 실패 → fix goal {added}개 추가"
+            )
         return added
 
     # ---------- 좀비 복구 / plan 동기화 ----------
@@ -439,15 +627,26 @@ class TeamLead:
             if size >= 200:
                 self.registry.set_status(rec.agent_id, "DONE")
                 self._log(f"  🔄 좀비 복구: {rec.agent_id} RUNNING → DONE (delivery {size}B)")
-                self.timeline.emit("lead", "zombie_recovered",
-                                   agent_id=rec.agent_id, to="DONE", delivery_bytes=size)
+                self.timeline.emit(
+                    "lead",
+                    "zombie_recovered",
+                    agent_id=rec.agent_id,
+                    to="DONE",
+                    delivery_bytes=size,
+                )
             else:
-                self.registry.update(rec.agent_id, status="FAILED",
-                                     last_error="이전 run zombie (delivery 비어있음)")
+                self.registry.update(
+                    rec.agent_id, status="FAILED", last_error="이전 run zombie (delivery 비어있음)"
+                )
                 self._unassign_from_plan(rec.agent_id)
                 self._log(f"  🔄 좀비 복구: {rec.agent_id} RUNNING → FAILED + plan unassign")
-                self.timeline.emit("lead", "zombie_recovered",
-                                   agent_id=rec.agent_id, to="FAILED", delivery_bytes=size)
+                self.timeline.emit(
+                    "lead",
+                    "zombie_recovered",
+                    agent_id=rec.agent_id,
+                    to="FAILED",
+                    delivery_bytes=size,
+                )
 
     def _unassign_from_plan(self, agent_id: str) -> None:
         """plan.md 의 goals 중 이 agent 에게 assigned 된 미완료 goal 의 assigned 를 비움."""
@@ -462,9 +661,97 @@ class TeamLead:
         if changed:
             render_plan(self.plan_md, "Plan", goals)
 
+    # ---------- goal 분할 (FAILED 1회 후) ----------
+
+    def _maybe_split_failed_goal(self, agent_id: str, error: str) -> bool:
+        """첫 실패면 goal 을 2개 sub-goal 로 분할해 plan 갈아끼움. 분할 적용 시 True."""
+        rec = self.registry.get(agent_id)
+        if rec is None:
+            return False
+        goal_id = rec.goal_id
+
+        # 이미 분할된 sub-goal 이면 또 분할 금지 (무한 분할 방지).
+        if GOAL_SPLIT_MARKER in goal_id:
+            return False
+
+        # 같은 goal_id 로 FAILED 가 이번이 첫 번째인가? (registry 는 방금 이번 실패를 반영한 상태)
+        same_goal_failed = sum(
+            1 for r in self.registry.all() if r.goal_id == goal_id and r.status == "FAILED"
+        )
+        if same_goal_failed > 1:
+            return False  # 이전에 이미 시도했거나 분할 후 또 실패 → 그냥 unassign 흐름
+
+        goals = parse_plan(self.plan_md)
+        target = next((g for g in goals if g.id == goal_id), None)
+        if target is None or target.done:
+            return False
+
+        sub_goals = self._llm_split_goal(target)
+        if not sub_goals or len(sub_goals) != 2:
+            return False
+
+        new_goals: list[Goal] = []
+        for g in goals:
+            if g.id == goal_id:
+                new_goals.extend(sub_goals)
+            else:
+                new_goals.append(g)
+        render_plan(self.plan_md, "Plan", new_goals)
+        self._log(
+            f"  ✂️  goal 분할: {goal_id} → {sub_goals[0].id} + {sub_goals[1].id} "
+            f"(원인: {error[:80]})"
+        )
+        self.timeline.emit(
+            "lead",
+            "goal_split",
+            parent=goal_id,
+            children=[g.id for g in sub_goals],
+            reason=error[:140],
+        )
+        return True
+
+    def _llm_split_goal(self, goal: Goal) -> list[Goal] | None:
+        """LLM 으로 goal title 을 2개 sub-goal title 로 쪼갠다. opus 1콜."""
+        system = (
+            "너는 팀장의 plan 분해 보조. 큰 작업이 한 멤버 세션에서 안 끝나서 FAILED "
+            "되었다. 이 goal 을 정확히 2개의 작은 sub-goal 로 분할하라. 각 sub-goal 은 "
+            "독립적으로 한 멤버가 끝낼 수 있어야 하고, 둘을 합치면 원래 goal 을 덮어야 한다. "
+            'JSON 한 줄만 출력: {"a": "첫 번째 sub-goal title", "b": "두 번째 sub-goal title"}. '
+            "JSON 외 텍스트 금지. 각 title 은 한 문장."
+        )
+        user = (
+            f"# 분할 대상\n"
+            f"id: {goal.id}\n"
+            f"title: {goal.title}\n\n"
+            "# 출력 (정확히 JSON)\n"
+            '{"a": "...", "b": "..."}'
+        )
+        try:
+            from core.llm import parse_json_loose
+
+            raw = self.llm.call(system, user, tier="opus")
+            data = parse_json_loose(raw)
+            a = str(data.get("a") or "").strip()
+            b = str(data.get("b") or "").strip()
+            if not a or not b:
+                return None
+            return [
+                Goal(id=f"{goal.id}{GOAL_SPLIT_MARKER}a", title=a),
+                Goal(id=f"{goal.id}{GOAL_SPLIT_MARKER}b", title=b),
+            ]
+        except Exception as e:
+            self._log(f"  ⚠ goal 분할 LLM 실패: {e}")
+            return None
+
     def _ws_main_summary(self, max_files: int = 60) -> str:
-        """plan_initial / hire_brief 컨텍스트로 ws/main 의 .py 파일 목록 (경로 + 라인 수).
-        라인 수가 있으면 decomposer 가 *큰 파일=수정 대상* / *작은 stub=신규 작성 여지* 를 판단하기 쉬워진다."""
+        """plan_initial / hire_brief 컨텍스트로 ws/main 의 .py 파일 목록.
+
+        경로 + 라인 수 + 모듈 docstring 첫 줄.
+        라인 수가 있으면 decomposer 가 *큰 파일=수정 대상* /
+        *작은 stub=신규 작성 여지* 를 판단하기 쉬워진다.
+        모듈 docstring 첫 줄이 있으면 함께 노출해 시드 정합성(refine vs new)
+        판단 신호를 강화한다.
+        """
         if not self.ws_main.exists():
             return "(비어있음)"
         files: list[str] = []
@@ -473,11 +760,23 @@ class TeamLead:
             if "__pycache__" in parts or ".venv" in parts or ".archive" in parts:
                 continue
             try:
-                with p.open("r", encoding="utf-8") as fh:
-                    lines = sum(1 for _ in fh)
-            except OSError:
-                lines = 0
-            files.append(f"{p.relative_to(self.ws_main)} ({lines}L)")
+                text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                text = ""
+            lines = len(text.splitlines())
+            doc_summary = ""
+            if text:
+                try:
+                    module_doc = ast.get_docstring(ast.parse(text))
+                except (SyntaxError, ValueError):
+                    module_doc = None
+                if module_doc:
+                    doc_summary = module_doc.splitlines()[0].strip()
+            rel = p.relative_to(self.ws_main)
+            if doc_summary:
+                files.append(f"{rel} ({lines}L) — {doc_summary}")
+            else:
+                files.append(f"{rel} ({lines}L)")
             if len(files) >= max_files:
                 break
         if not files:
@@ -487,7 +786,7 @@ class TeamLead:
     # ---------- LLM 결정 ----------
 
     def _initial_plan(self) -> None:
-        """spec → plan.md 초기 분해 (한 번만). 형식 위반 시 1회 strict 재시도."""
+        """spec → plan.md 초기 분해 (한 번만). JSON 형식이면 strict 검증, 아니면 markdown."""
         self._log("🧭 plan.md 초기 분해")
         system, user = render_split(
             "plan_initial",
@@ -517,6 +816,36 @@ class TeamLead:
             self.timeline.emit("lead", "plan_update", note="fallback initial plan")
             return
 
+        # JSON 경로: 응답이 JSON 객체로 시작하면 strict pydantic 검증 + 재시도 루프.
+        # markdown 경로는 기존 로직 그대로. 두 경로는 서로 충돌하지 않게 분기.
+        stripped = raw.lstrip()
+        if stripped.startswith("{") or stripped.startswith("```json"):
+            try:
+                plan_schema = validate_decomposer_output(raw)
+            except ValidationFailure as vf:
+                self._log(f"⚠️  JSON plan 검증 실패 1회 — retry 루프 진입: {vf.reason[:160]}")
+                try:
+                    plan_schema = _call_decomposer_with_validation(
+                        self.llm,
+                        system,
+                        user,
+                        tier="opus",
+                        log=self._log,
+                    )
+                except ValidationFailure as vf2:
+                    self._log(
+                        f"⚠️  JSON plan retry 모두 실패 — markdown 경로 fallback: {vf2.reason[:160]}"
+                    )
+                    plan_schema = None
+            if plan_schema is not None:
+                self._write_plan_from_schema(plan_schema)
+                self.timeline.emit(
+                    "lead",
+                    "plan_update",
+                    note=f"strict JSON plan ({len(plan_schema.sub_goals)} goals)",
+                )
+                return
+
         n = _extract_and_write(raw)
         if n == 0:
             # LLM 이 형식을 어김 (서술 단락만, goal 라인 없음). strict 재시도 1회.
@@ -534,16 +863,25 @@ class TeamLead:
                 self._log(f"⚠️  strict 재시도 실패: {e}")
                 n = 0
             if n == 0:
-                self._log("❌ strict 재시도 후에도 goal 0개 — 안전 fallback 으로 1개 bootstrap goal 작성")
+                self._log(
+                    "❌ strict 재시도 후에도 goal 0개 — 안전 fallback 으로 1개 bootstrap goal 작성"
+                )
                 self.plan_md.write_text(
-                    "# Plan\n- [ ] G-001-bootstrap: 요구서를 읽고 첫 작업 결정 (LLM 형식 위반으로 자동 분해 실패)\n",
+                    "# Plan\n- [ ] G-001-bootstrap: 요구서를 읽고 첫 작업 결정 "
+                    "(LLM 형식 위반으로 자동 분해 실패)\n",
                     encoding="utf-8",
                 )
-                self.timeline.emit("lead", "plan_update",
-                                   note="LLM 형식 위반 → fallback bootstrap goal")
+                self.timeline.emit(
+                    "lead", "plan_update", note="LLM 형식 위반 → fallback bootstrap goal"
+                )
                 return
 
         self.timeline.emit("lead", "plan_update", note=f"초기 plan 작성됨 ({n} goals)")
+
+    def _write_plan_from_schema(self, plan: PlanSchema) -> None:
+        """strict JSON 검증 통과한 PlanSchema 를 markdown plan.md 로 직렬화."""
+        goals = [Goal(id=g.id, title=g.title, done=False, assigned="") for g in plan.sub_goals]
+        render_plan(self.plan_md, "Plan", goals)
 
     def _hire_next_unassigned(self) -> bool:
         goals = parse_plan(self.plan_md)
@@ -563,10 +901,10 @@ class TeamLead:
             goal_id=target.id,
             mission=brief_data["mission"],
             deliverables=brief_data["deliverables"],
-            verification_checks=brief_data.get("verification_checks", []),
+            verification_checks=list(brief_data.get("verification_checks") or []),
             system_prompt=brief_data["system_prompt"],
-            allowed_tools=brief_data.get("allowed_tools"),
-            seed_files=brief_data.get("seed_files"),
+            allowed_tools=list(brief_data.get("allowed_tools") or []) or None,
+            seed_files=list(brief_data.get("seed_files") or []) or None,
             verify=bool(brief_data.get("verify", False)),
         )
         self.spawner.write_brief(brief)
@@ -580,15 +918,25 @@ class TeamLead:
         # 첫 instruction
         append_message(
             self.agents_root / agent_id / "mailbox.md",
-            from_="lead", to=agent_id, kind="instruction",
+            from_="lead",
+            to=agent_id,
+            kind="instruction",
             body=f"# 첫 지시\n{brief.mission}\n\n작업 시작.",
         )
 
         self._submit_spawn(brief, resume_count=0)
         return True
 
-    def _llm_hire_brief(self, goal: Goal) -> Optional[dict]:
-        """LLM에게 채용 brief(JSON) 작성 시키기."""
+    def _llm_hire_brief(self, goal: Goal) -> dict[str, Any] | None:
+        """LLM에게 채용 brief(JSON) 작성 시키기.
+
+        kind 라벨 (new|refine|extend|remove) 누락/오류 시 코드 차원 재시도
+        (최대 _BRIEF_VALIDATION_MAX_ATTEMPTS 회). 모두 실패해도 mission 만 확보되면
+        fallback kind="new" 로 진행 — brief 자체를 못 만드는 것보다 라벨 부정확이 회복 가능.
+        반환 dict 의 mission 첫 문장은 항상 [kind=KIND] prefix 로 정규화된다.
+        """
+        from core.llm import parse_json_loose
+
         system, user = render_split(
             "hire_brief",
             spec=self.spec[:3000],
@@ -596,41 +944,98 @@ class TeamLead:
             goal_title=goal.title,
             ws_main_tree=self._ws_main_summary(),
         )
-        try:
-            from core.llm import parse_json_loose
-            # 멤버 mission/검증 정의 — 너무 좁으면 부족, 너무 넓으면 멤버 헤맴. opus.
-            raw = self.llm.call(system, user, tier="opus")
+        # 재시도 시 prepend 할 strict 안내. LLM 에 정확한 형식 예시 노출.
+        strict_suffix = (
+            "\n\nHARD REQUIREMENT: 응답 JSON 에 `kind` 필드를 반드시 포함. "
+            'kind="new" | kind="refine" | kind="extend" | kind="remove" 중 정확히 하나. '
+            "누락/오타는 자동 거부 + 재시도 비용 발생. mission 첫 문장도 동일한 라벨 prefix "
+            '(예: "[kind=refine] ...") 로 시작 권장.'
+        )
+
+        last_data: dict[str, Any] | None = None
+        last_error: str = "no attempt completed"
+        for attempt in range(1, _BRIEF_VALIDATION_MAX_ATTEMPTS + 1):
+            sys_prompt = system if attempt == 1 else (system + strict_suffix)
+            try:
+                # 멤버 mission/검증 정의 — 너무 좁으면 부족, 너무 넓으면 멤버 헤맴. opus.
+                # RateLimitExhausted/BudgetExceeded 는 run() 루프가 처리하도록 의도적으로 propagate.
+                raw = self.llm.call(sys_prompt, user, tier="opus")
+            except (RuntimeError, OSError, ValueError) as e:
+                last_error = f"LLM 호출 실패: {e}"
+                self._log(
+                    f"  ⚠️ hire-brief 시도 {attempt}/{_BRIEF_VALIDATION_MAX_ATTEMPTS} LLM 실패: {e}"
+                )
+                continue
+
+            # parse_json_loose 는 실패 시 {} 반환 (예외 안 던짐) — 별도 try 불필요.
             data = parse_json_loose(raw)
             if not data or "mission" not in data:
-                return None
-            data.setdefault("deliverables", [])
-            data.setdefault("verification_checks", [])
-            data.setdefault("system_prompt", "너는 능력 있는 엔지니어. 미션 완수 후 검증 기준 통과.")
-            # 자동 보완: deliverables 의 파일 경로가 ws_main 에 실재하면 seed_files 강제 포함.
-            # decomposer LLM 이 빠뜨려도 시드 누락 → 100% 충돌 패턴 방지.
-            seed = list(data.get("seed_files") or [])
-            seed_set = set(seed)
-            added: list[str] = []
-            for d in data["deliverables"]:
-                path = str(d).split("—")[0].split(" - ")[0].strip()
-                if not path or path in seed_set:
-                    continue
-                if (self.ws_main / path).is_file():
-                    seed.append(path)
-                    seed_set.add(path)
-                    added.append(path)
-            if added:
-                data["seed_files"] = seed
-                preview = ", ".join(added[:3]) + ("…" if len(added) > 3 else "")
-                self._log(f"  🔧 seed_files 자동 보완 +{len(added)} ({preview})")
-            return data
-        except Exception as e:
-            self._log(f"  ⚠️ hire-brief LLM 실패: {e}")
-            self.timeline.emit("lead", "error", error=f"hire-brief: {e}", goal=goal.id)
-            return None
+                last_error = "mission 필드 누락"
+                self._log(
+                    f"  ⚠️ hire-brief 시도 {attempt}/{_BRIEF_VALIDATION_MAX_ATTEMPTS} mission 누락"
+                )
+                continue
+
+            last_data = data
+            kind_raw = str(data.get("kind", "")).strip().lower()
+            if kind_raw in _VALID_BRIEF_KINDS:
+                return self._finalize_brief(data, kind_raw)
+
+            last_error = f"kind 필드 누락/오류 ({kind_raw!r})"
+            self._log(
+                f"  ⚠️ hire-brief 시도 {attempt}/{_BRIEF_VALIDATION_MAX_ATTEMPTS} "
+                f"kind 검증 실패 ({kind_raw!r}) — 재시도"
+            )
+
+        # 모든 시도 종료. mission 만이라도 확보됐으면 fallback kind="new" 로 진행.
+        if last_data is not None:
+            self._log(
+                f"  ⚠️ hire-brief kind 재시도 {_BRIEF_VALIDATION_MAX_ATTEMPTS}회 실패 "
+                f'— fallback kind="new" 적용 ({last_error})'
+            )
+            self.timeline.emit(
+                "lead",
+                "error",
+                error=f"hire-brief kind 검증 fallback: {last_error}",
+                goal=goal.id,
+            )
+            return self._finalize_brief(last_data, "new")
+
+        self._log(f"  ⚠️ hire-brief 모든 시도 실패: {last_error}")
+        self.timeline.emit("lead", "error", error=f"hire-brief: {last_error}", goal=goal.id)
+        return None
+
+    def _finalize_brief(self, data: dict[str, Any], kind: str) -> dict[str, Any]:
+        """검증 통과한 brief data 의 후처리.
+
+        기본값 채움, mission 라벨 prefix 보정, seed_files 자동 보완.
+        """
+        data["kind"] = kind
+        data.setdefault("deliverables", [])
+        data.setdefault("verification_checks", [])
+        data.setdefault("system_prompt", "너는 능력 있는 엔지니어. 미션 완수 후 검증 기준 통과.")
+        data["mission"] = _ensure_mission_label(str(data["mission"]), kind)
+
+        # 자동 보완: deliverables 의 파일 경로가 ws_main 에 실재하면 seed_files 강제 포함.
+        # decomposer LLM 이 빠뜨려도 시드 누락 → 100% 충돌 패턴 방지.
+        seed = list(data.get("seed_files") or [])
+        seed_set = set(seed)
+        added: list[str] = []
+        for d in data["deliverables"]:
+            path = str(d).split("—")[0].split(" - ")[0].strip()
+            if not path or path in seed_set:
+                continue
+            if (self.ws_main / path).is_file():
+                seed.append(path)
+                seed_set.add(path)
+                added.append(path)
+        if added:
+            data["seed_files"] = seed
+            preview = ", ".join(added[:3]) + ("…" if len(added) > 3 else "")
+            self._log(f"  🔧 seed_files 자동 보완 +{len(added)} ({preview})")
+        return data
 
     def _handle_waiting(self, agent_id: str) -> bool:
-        rec = self.registry.get(agent_id)
         mbox = self.agents_root / agent_id / "mailbox.md"
         msgs = parse_messages(mbox)
         last_q = next((m for m in reversed(msgs) if m.kind == "question"), None)
@@ -654,10 +1059,10 @@ class TeamLead:
         else:
             self._log(f"  💬 {agent_id} 질문 답변 작성")
             reply_body = self._llm_reply(agent_id, last_q, msgs)
-        append_message(mbox, from_="lead", to=agent_id, kind="reply",
-                       body=reply_body, ref=last_q.id)
-        self.timeline.emit("lead", "reply", to=agent_id, ref=last_q.id,
-                           summary=reply_body[:200])
+        append_message(
+            mbox, from_="lead", to=agent_id, kind="reply", body=reply_body, ref=last_q.id
+        )
+        self.timeline.emit("lead", "reply", to=agent_id, ref=last_q.id, summary=reply_body[:200])
         return self._resume_member(agent_id)
 
     def _is_high_stakes_question(self, question_body: str) -> bool:
@@ -686,6 +1091,7 @@ class TeamLead:
         )
         try:
             from core.llm import parse_json_loose
+
             raw = self.llm.call(system, user, tier="haiku")
             data = parse_json_loose(raw)
             return bool(data.get("high_stakes"))
@@ -702,9 +1108,7 @@ class TeamLead:
 
         brief = (self.agents_root / agent_id / "brief.md").read_text(encoding="utf-8")
         recent = all_msgs[-6:]
-        thread = "\n\n".join(
-            f"### {m.from_}→{m.to} {m.kind} #{m.id}\n{m.body}" for m in recent
-        )
+        thread = "\n\n".join(f"### {m.from_}→{m.to} {m.kind} #{m.id}\n{m.body}" for m in recent)
         context = (
             f"# 멤버 brief\n{brief[:1500]}\n\n"
             f"# 최근 mailbox 스레드\n{thread[:2000]}\n\n"
@@ -714,18 +1118,22 @@ class TeamLead:
         debate_id = f"{agent_id}-q{question.id}-{int(time.time())}"
         try:
             outcome = panel.deliberate(
-                question=question.body, context=context,
-                debate_id=debate_id, auto_decide=True,
+                question=question.body,
+                context=context,
+                debate_id=debate_id,
+                auto_decide=True,
             )
         except Exception as e:
             self._log(f"  ⚠ 토론 실패, 단순 답변으로 fallback: {e}")
-            self.timeline.emit("lead", "error", error=f"debate: {e}",
-                               agent_id=agent_id)
+            self.timeline.emit("lead", "error", error=f"debate: {e}", agent_id=agent_id)
             return self._llm_reply(agent_id, question, all_msgs)
 
         self.timeline.emit(
-            "lead", "debate_decided", agent_id=agent_id,
-            debate_id=debate_id, summary=outcome.decision[:200],
+            "lead",
+            "debate_decided",
+            agent_id=agent_id,
+            debate_id=debate_id,
+            summary=outcome.decision[:200],
         )
         return (
             f"## Reply (4-way 토론 결정)\n"
@@ -736,9 +1144,7 @@ class TeamLead:
     def _llm_reply(self, agent_id: str, question: Message, all_msgs: list[Message]) -> str:
         brief = (self.agents_root / agent_id / "brief.md").read_text(encoding="utf-8")
         recent = all_msgs[-6:]
-        thread = "\n\n".join(
-            f"### {m.from_}→{m.to} {m.kind} #{m.id}\n{m.body}" for m in recent
-        )
+        thread = "\n\n".join(f"### {m.from_}→{m.to} {m.kind} #{m.id}\n{m.body}" for m in recent)
         system, user = render_split(
             "reply",
             brief=brief[:2000],
@@ -755,10 +1161,13 @@ class TeamLead:
 
     def _resume_member(self, agent_id: str) -> bool:
         rec = self.registry.get(agent_id)
+        if rec is None:
+            self._log(f"  ⊘ {agent_id} registry 미등록 → FAILED")
+            self.registry.update(agent_id, status="FAILED", last_error="registry miss")
+            return False
         if rec.last_resume >= RESUME_SAFETY_CAP:
             self._log(f"  ⊘ {agent_id} resume 한도 초과 → FAILED")
-            self.registry.update(agent_id, status="FAILED",
-                                 last_error="resume 한도 초과")
+            self.registry.update(agent_id, status="FAILED", last_error="resume 한도 초과")
             self.timeline.emit("lead", "fire", agent_id=agent_id, reason="resume 한도 초과")
             return False
 
@@ -772,7 +1181,7 @@ class TeamLead:
         self._submit_spawn(brief, resume_count=next_n)
         return True
 
-    def _reconstruct_brief(self, agent_id: str) -> Optional[HireBrief]:
+    def _reconstruct_brief(self, agent_id: str) -> HireBrief | None:
         """brief.md + system_prompt.md에서 HireBrief 복원."""
         agent_dir = self.agents_root / agent_id
         sp = agent_dir / "system_prompt.md"
@@ -796,8 +1205,9 @@ class TeamLead:
         except Exception as e:
             self._log(f"  ⚠ spawn 예외 ({brief.agent_id}): {e}")
             self.timeline.emit("lead", "error", error=f"spawn: {e}", agent_id=brief.agent_id)
-            return SpawnResult(agent_id=brief.agent_id, status="FAILED",
-                               raw_output="", error=str(e))
+            return SpawnResult(
+                agent_id=brief.agent_id, status="FAILED", raw_output="", error=str(e)
+            )
 
     def _submit_spawn(self, brief: HireBrief, resume_count: int) -> None:
         """Executor에 spawn submit. 메인 스레드에서만 호출. 등록 + 상태 RUNNING."""
@@ -831,6 +1241,9 @@ class TeamLead:
                 self.timeline.emit("lead", "error", error=f"future: {e}", agent_id=aid)
                 self.registry.update(aid, status="FAILED", last_error=str(e)[:300])
                 continue
+            if brief is None:
+                self._log(f"  ⚠ spawn brief 누락 ({aid}) → _post_spawn skip")
+                continue
             self._post_spawn(aid, result, brief)
         return True
 
@@ -849,7 +1262,7 @@ class TeamLead:
         # 누적 비용 + 마지막 session_id 기록 (status 와 무관하게 매 spawn 마다)
         if result.cost_usd or result.session_id:
             rec = self.registry.get(agent_id)
-            updates: dict = {}
+            updates: dict[str, Any] = {}
             if result.cost_usd:
                 updates["cost_usd"] = (rec.cost_usd if rec else 0.0) + result.cost_usd
             if result.session_id:
@@ -862,11 +1275,18 @@ class TeamLead:
         elif result.status == "WAITING":
             self.registry.set_status(agent_id, "WAITING")
         elif result.status == "FAILED":
-            self.registry.update(agent_id, status="FAILED",
-                                 last_error=result.error[:300])
-            self._unassign_from_plan(agent_id)  # FAILED 즉시 plan 동기화 — 다음 tick 에 재hire 가능
-            self.timeline.emit("lead", "fire", agent_id=agent_id,
-                               reason=f"멤버가 FAILED 보고: {result.error[:140]}")
+            self.registry.update(agent_id, status="FAILED", last_error=result.error[:300])
+            # 첫 실패면 goal 을 2개로 분할 (큰 goal 은 한 세션 max_turns 안에 못 끝나
+            # FAILED 누적 + 비용만 증가). 분할되면 원본 goal 라인이 plan 에서 사라지므로
+            # _unassign_from_plan 불필요. 분할 실패 / 이미 분할된 sub-goal 이면 기존 흐름.
+            if not self._maybe_split_failed_goal(agent_id, result.error):
+                self._unassign_from_plan(agent_id)
+            self.timeline.emit(
+                "lead",
+                "fire",
+                agent_id=agent_id,
+                reason=f"멤버가 FAILED 보고: {result.error[:140]}",
+            )
         else:
             # 알 수 없는 상태 — 토큰 미부착. 일단 WAITING으로 두고 다음 사이클에 봄
             self.registry.set_status(agent_id, "WAITING")
@@ -887,7 +1307,7 @@ class TeamLead:
             try:
                 raw = json.loads(checks_inline.read_text())
                 checks = [Check.from_dict(c) for c in raw]
-            except Exception:
+            except (json.JSONDecodeError, OSError, KeyError, TypeError):
                 pass
 
         if checks:
@@ -895,19 +1315,18 @@ class TeamLead:
             try:
                 report = verifier.run(checks)
             except Exception as e:
-                self.registry.update(agent_id, status="FAILED",
-                                     last_error=f"verify 예외: {e}")
-                self.timeline.emit("lead", "verify_fail", agent_id=agent_id,
-                                   detail=f"예외: {e}")
+                self.registry.update(agent_id, status="FAILED", last_error=f"verify 예외: {e}")
+                self.timeline.emit("lead", "verify_fail", agent_id=agent_id, detail=f"예외: {e}")
                 return True
             if not report.passed:
-                self.registry.update(agent_id, status="FAILED",
-                                     last_error=report.failure_summary()[:300])
-                self.timeline.emit("lead", "verify_fail", agent_id=agent_id,
-                                   detail=report.failure_summary())
+                self.registry.update(
+                    agent_id, status="FAILED", last_error=report.failure_summary()[:300]
+                )
+                self.timeline.emit(
+                    "lead", "verify_fail", agent_id=agent_id, detail=report.failure_summary()
+                )
                 return True
-            self.timeline.emit("lead", "verify_pass", agent_id=agent_id,
-                               checks=len(checks))
+            self.timeline.emit("lead", "verify_pass", agent_id=agent_id, checks=len(checks))
         else:
             self.timeline.emit("lead", "verify_pass", agent_id=agent_id, checks=0)
 
@@ -930,11 +1349,17 @@ class TeamLead:
                 self._log(f"  🔍 Evaluator FAIL → {agent_id} 재spawn (1 cycle)")
                 append_message(
                     agent_dir / "mailbox.md",
-                    from_="lead", to=agent_id, kind="instruction",
-                    body=f"# Evaluator critique\n{critique}\n\n위 문제를 해결하고 다시 [STATUS:DONE]을 보고하라.",
+                    from_="lead",
+                    to=agent_id,
+                    kind="instruction",
+                    body=(
+                        f"# Evaluator critique\n{critique}\n\n"
+                        "위 문제를 해결하고 다시 [STATUS:DONE]을 보고하라."
+                    ),
                 )
-                self.timeline.emit("lead", "verify_fail", agent_id=agent_id,
-                                   detail=f"evaluator: {critique[:140]}")
+                self.timeline.emit(
+                    "lead", "verify_fail", agent_id=agent_id, detail=f"evaluator: {critique[:140]}"
+                )
                 self.registry.update(agent_id, status="RUNNING")
                 brief = self._briefs.get(agent_id) or self._reconstruct_brief(agent_id)
                 if brief:
@@ -947,13 +1372,18 @@ class TeamLead:
         # merge
         merge_report = self.merger.merge(ws, agent_id)
         self.timeline.emit(
-            "lead", "merge", agent_id=agent_id,
-            copied=len(merge_report.copied), conflicts=len(merge_report.conflicts),
+            "lead",
+            "merge",
+            agent_id=agent_id,
+            copied=len(merge_report.copied),
+            conflicts=len(merge_report.conflicts),
         )
 
-        # 충돌 발생 시 4-way 토론으로 자동 통합 시도
+        # 충돌 발생 시 먼저 시드 유사도 게이트로 폐기/재지시 판정 → 살아남은 충돌만 토론.
         if merge_report.conflicts:
-            self._resolve_conflicts_via_debate(agent_id, merge_report.conflicts)
+            surviving = self._seed_similarity_gate(agent_id, merge_report.conflicts)
+            if surviving:
+                self._resolve_conflicts_via_debate(agent_id, surviving)
 
         # plan.md에서 해당 goal 체크
         goals = parse_plan(self.plan_md)
@@ -969,17 +1399,183 @@ class TeamLead:
     def _already_merged(self, agent_id: str) -> bool:
         return (self.agents_root / agent_id / ".merged").exists()
 
+    # ---------- 재시작 복구 + graceful shutdown (G-011) ----------
+
+    def restore_state(self) -> None:
+        """lead 재시작 시 디스크 상태로 in-flight 멤버/충돌 큐 복원.
+
+        - 각 멤버: mailbox 의 마지막 멤버 메시지로 상태 분류 (DONE / WAITING /
+          RUNNING / FAILED / UNKNOWN). PID 파일이 살아있으면 `_reattached` 에
+          등록 (이후 `_recover_zombies` 가 건너뜀).
+        - state/lead/conflicts/*.md 글롭하여 `conflict_queue` 재로드.
+        """
+        # 1) 충돌 큐 재로드
+        self.conflict_queue = []
+        conflicts_dir = self.lead_state_dir / "conflicts"
+        if conflicts_dir.exists():
+            for md in sorted(conflicts_dir.glob("*.md")):
+                if md.name.endswith(".archive.md"):
+                    continue
+                item = parse_conflict_file(md)
+                if item is not None:
+                    self.conflict_queue.append(item)
+
+        # 2) 멤버 상태 복원
+        if not self.agents_root.exists():
+            return
+        for agent_dir in sorted(self.agents_root.iterdir()):
+            if not agent_dir.is_dir():
+                continue
+            agent_id = agent_dir.name
+            if not _AGENT_ID_RE.match(agent_id):
+                continue
+
+            mailbox = agent_dir / "mailbox.md"
+            last_msg = mailbox_last_member_message(mailbox, agent_id)
+            state = classify_mailbox_state(last_msg)
+
+            if state == "DONE":
+                self.registry.update(agent_id, status="DONE")
+                continue
+            if state == "FAILED":
+                self.registry.update(
+                    agent_id, status="FAILED", last_error="restore: 마지막 메시지 FAILED"
+                )
+                continue
+            if state == "WAITING":
+                self.registry.update(agent_id, status="WAITING")
+                continue
+            if state == "UNKNOWN":
+                continue
+
+            # RUNNING: PID 살아있으면 reattach, 아니면 zombie recovery 에 위임
+            pid = read_pid_file(agent_id, self.agents_root)
+            if pid is not None and is_pid_alive(pid):
+                self.registry.update(agent_id, status="RUNNING")
+                self._reattached.add(agent_id)
+            else:
+                self.registry.update(agent_id, status="RUNNING")
+
+    def graceful_shutdown(self, timeout: float) -> None:
+        """SIGTERM/SIGINT 시 in-flight spawn future 들을 grace 동안 drain.
+
+        호출 시점에 `_shutdown_requested` set → spawn future 결과를 회수 (자식 자체는
+        kill 안 함, lead 종료 시 자연히 종료). timeout 내 미회수 항목은 남겨두고
+        timeline 에 `shutdown_timeout` 이벤트 emit 후 반환.
+        """
+        self._shutdown_requested = True
+        if not self._pending:
+            return
+
+        t0 = time.monotonic()
+        while self._pending and (time.monotonic() - t0) < timeout:
+            self._collect_completed_spawns()
+            if not self._pending:
+                break
+            time.sleep(0.05)
+
+        if self._pending:
+            self.timeline.emit(
+                "lead",
+                "shutdown_timeout",
+                pending=list(self._pending.keys()),
+                elapsed=round(time.monotonic() - t0, 3),
+            )
+
+    # ---------- 시드 유사도 게이트 ----------
+
+    def _seed_similarity_gate(self, agent_id: str, conflicts: list[str]) -> list[str] | None:
+        """충돌 토론 비용 쓰기 전에 시드 의도에서 너무 멀어진 산출물을 폐기 + 재지시.
+
+        반환:
+          - list[str]: 통과/SKIP/BYPASS — 호출자가 그대로 debate 로 회부.
+          - None: REFINE — 멤버 전체 폐기 + 재spawn 트리거됨. debate 회부 금지.
+        """
+        if not conflicts:
+            return []
+
+        brief = self._briefs.get(agent_id) or self._reconstruct_brief(agent_id)
+        brief_kind = getattr(brief, "kind", "") if brief is not None else ""
+
+        mailbox = self.agents_root / agent_id / "mailbox.md"
+        prior_msgs = parse_messages(mailbox)
+        refine_count = sum(1 for m in prior_msgs if m.kind == "refine" and m.from_ == "lead")
+
+        decision = decide_gate(
+            list(conflicts),
+            ws_main=self.ws_main,
+            agent_id=agent_id,
+            brief_kind=brief_kind,
+            refine_count=refine_count,
+            max_respawns=SEED_GATE_MAX_RESPAWNS,
+        )
+
+        if decision.action in (GATE_ACTION_PASS, GATE_ACTION_SKIP):
+            return list(decision.surviving_conflicts)
+
+        if decision.action == GATE_ACTION_BYPASS:
+            self.timeline.emit(
+                "lead",
+                "seed_gate_bypass",
+                agent_id=agent_id,
+                conflicts=len(conflicts),
+                refine_count=refine_count,
+            )
+            return list(decision.surviving_conflicts)
+
+        if decision.action != GATE_ACTION_REFINE:
+            return list(decision.surviving_conflicts)
+
+        # REFINE: 멤버 전체 폐기 + refine 재지시 + 재spawn
+        worst = decision.worst_outcome
+        if worst is None:
+            return list(conflicts)
+
+        for outcome in decision.all_outcomes:
+            if outcome.stash_rel:
+                (self.ws_main / outcome.stash_rel).unlink(missing_ok=True)
+
+        extras = [o.rel for o in decision.failed_outcomes if o.rel != worst.rel]
+        body = build_refine_message(
+            seed_path=worst.rel,
+            member_path=worst.stash_rel or f"{worst.rel}.from-{agent_id}",
+            similarity=worst.similarity,
+            diff_summary=worst.diff_summary,
+            extra_files=extras,
+        )
+        append_message(
+            mailbox,
+            from_="lead",
+            to=agent_id,
+            kind="refine",
+            body=body,
+        )
+
+        self.timeline.emit(
+            "lead",
+            "seed_gate_refine",
+            agent_id=agent_id,
+            worst=worst.rel,
+            similarity=round(worst.similarity, 3),
+            failed_count=len(decision.failed_outcomes),
+        )
+
+        if brief is not None:
+            rec = self.registry.get(agent_id)
+            next_n = (rec.last_resume if rec else 0) + 1
+            self.registry.update(agent_id, last_resume=next_n)
+            self._submit_spawn(brief, resume_count=next_n)
+
+        return None
+
     # ---------- 충돌 자동 토론 + 통합 ----------
 
-    def _resolve_conflicts_via_debate(
-        self, new_agent_id: str, conflicts: list[str]
-    ) -> None:
-        """**goal 한 개당 1 토론**: 한 멤버의 모든 충돌 파일을 묶어서 한 번에 토론.
-        파일마다 별도 토론하면 N×5-8분 직렬화로 비용/시간 폭증 — 한 멤버의 산출물은
-        논리적으로 연결되어 있어 한 컨텍스트에서 판단하는 게 자연스럽다.
+    def _resolve_conflicts_via_debate(self, new_agent_id: str, conflicts: list[str]) -> None:
+        """충돌 파일들을 (1) 결정론적 auto_merge → (2) 병렬 LLM 토론으로 해소.
 
-        흐름: (a) 유효 충돌 파일 모음 → (b) 1회 토론 (전체 파일 컨텍스트 묶음) →
-        (c) 파일별 통합본 추출 LLM 호출 → main 덮어쓰기 + stash 정리.
+        병렬화: asyncio.Semaphore(DEBATE_MAX_PARALLEL) + gather — 파일당 4-5분 직렬화 제거.
+        2단계 escalate: 1차 sonnet 토론에서 합의(consensus_reached) 못 하면 동일 충돌을
+        opus 모델로 재토론. auto_merge 가 모두 해소했으면 토론은 한 번도 일어나지 않는다.
         """
         valid: list[tuple[str, Path, Path]] = []
         for rel in conflicts:
@@ -994,99 +1590,254 @@ class TeamLead:
         if not valid:
             return
 
-        self._log(
-            f"  🤝 goal-level 충돌 토론 ({len(valid)} 파일) ↔ from-{new_agent_id}"
-        )
-        decision = self._debate_goal_conflicts(new_agent_id, valid)
-        if decision is None:
-            self._log("  ⚠ 토론 실패 — 모든 충돌 파일 main/stash 보존 (수동 처리)")
+        # 1단계: 결정론적 auto_merge (시드 base 가 있으면 3-way) — 안전 전략 매칭되면 LLM 없이 해소.
+        remaining = self._apply_auto_merge_pass(new_agent_id, valid)
+        if not remaining:
+            self._log(f"  ✓ auto_merge 가 모든 충돌 해소 ({len(valid)}개) — 토론 0회")
             return
 
-        for rel_clean, main_path, stash_path in valid:
-            merged = self._extract_merged_file(
-                rel_clean, main_path, stash_path, decision
-            )
-            if merged is None:
-                self._log(f"  ⚠ 통합 추출 실패 → 보존: {rel_clean}")
-                continue
-            try:
-                main_path.write_text(merged, encoding="utf-8")
-                stash_path.unlink(missing_ok=True)
-                self._log(f"  ✓ 통합 완료 {rel_clean}")
-            except OSError as e:
-                self._log(f"  ⚠ 통합본 쓰기 실패 {rel_clean}: {e}")
+        self._log(
+            f"  🤝 병렬 토론 ({len(remaining)}/{len(valid)} 파일 잔여, "
+            f"semaphore={DEBATE_MAX_PARALLEL}) ↔ from-{new_agent_id}"
+        )
+        asyncio.run(self._debate_remaining_async(new_agent_id, remaining))
 
-    def _debate_goal_conflicts(
+    def _apply_auto_merge_pass(
         self,
         new_agent_id: str,
         valid: list[tuple[str, Path, Path]],
-    ) -> Optional[str]:
-        """한 멤버의 모든 충돌을 묶어 한 번에 토론. 결정문에 파일별 채택 방향 포함."""
+    ) -> list[tuple[str, Path, Path]]:
+        """결정론적 3-way merge 시도.
+
+        성공한 파일은 main 덮어쓰고 stash 제거 + remaining 에서 제외.
+        """
+        seed_root = self.ws_root / new_agent_id / ".seed"
+        remaining: list[tuple[str, Path, Path]] = []
+        for rel_clean, main_path, stash_path in valid:
+            seed_path = seed_root / rel_clean
+            if not seed_path.is_file():
+                remaining.append((rel_clean, main_path, stash_path))
+                continue
+            try:
+                base = seed_path.read_text(encoding="utf-8", errors="ignore")
+                main_v = main_path.read_text(encoding="utf-8", errors="ignore")
+                stash_v = stash_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                remaining.append((rel_clean, main_path, stash_path))
+                continue
+            result = try_auto_merge(base, main_v, stash_v, path=rel_clean)
+            if result.merged is None:
+                remaining.append((rel_clean, main_path, stash_path))
+                continue
+            try:
+                main_path.write_text(result.merged, encoding="utf-8")
+                stash_path.unlink(missing_ok=True)
+            except OSError as e:
+                self._log(f"  ⚠ auto_merge 쓰기 실패 {rel_clean}: {e}")
+                remaining.append((rel_clean, main_path, stash_path))
+                continue
+            self._log(f"  ✓ auto_merge[{result.strategy}] {rel_clean}")
+            self.timeline.emit(
+                "lead",
+                "conflict_auto_merged",
+                agent_id=new_agent_id,
+                file=rel_clean,
+                strategy=result.strategy,
+            )
+        return remaining
+
+    async def _debate_remaining_async(
+        self,
+        new_agent_id: str,
+        remaining: list[tuple[str, Path, Path]],
+    ) -> None:
+        """잔여 충돌 N개를 병렬 토론 — Semaphore(DEBATE_MAX_PARALLEL) 한도 내에서 동시 실행."""
+        sem = asyncio.Semaphore(DEBATE_MAX_PARALLEL)
+        tasks = [
+            self._debate_one_conflict_async(sem, new_agent_id, rel, main_p, stash_p)
+            for rel, main_p, stash_p in remaining
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _debate_one_conflict_async(
+        self,
+        sem: asyncio.Semaphore,
+        new_agent_id: str,
+        rel_clean: str,
+        main_path: Path,
+        stash_path: Path,
+    ) -> None:
+        """단일 충돌 파일을 sonnet → (합의 실패 시) opus 로 escalate 토론, 통합본을 main 에 적용."""
+        async with sem:
+            # 1차: sonnet
+            outcome = await asyncio.to_thread(
+                self._run_conflict_debate,
+                new_agent_id,
+                rel_clean,
+                main_path,
+                stash_path,
+                MODEL_SONNET,
+                DEBATE_ROUND_TIMEOUT_SEC,
+            )
+            if outcome is not None and outcome.get("consensus") and outcome.get("merged"):
+                self._apply_merged(
+                    new_agent_id, rel_clean, main_path, stash_path, outcome, "sonnet"
+                )
+                return
+
+            # 2차: opus escalate
+            self._log(f"  ↑ escalate opus {rel_clean}")
+            self.timeline.emit(
+                "lead",
+                "debate_escalate",
+                agent_id=new_agent_id,
+                file=rel_clean,
+                from_model="sonnet",
+                to_model="opus",
+            )
+            outcome2 = await asyncio.to_thread(
+                self._run_conflict_debate,
+                new_agent_id,
+                rel_clean,
+                main_path,
+                stash_path,
+                MODEL_OPUS,
+                DEBATE_ESCALATE_TIMEOUT_SEC,
+            )
+            if outcome2 is not None and outcome2.get("merged"):
+                self._apply_merged(new_agent_id, rel_clean, main_path, stash_path, outcome2, "opus")
+                return
+
+            self._log(f"  ⚠ 토론 escalate 후에도 통합 실패 — 보존: {rel_clean}")
+
+    def _run_conflict_debate(
+        self,
+        new_agent_id: str,
+        rel_clean: str,
+        main_path: Path,
+        stash_path: Path,
+        model: str,
+        _timeout_sec: int,
+    ) -> dict[str, Any] | None:
+        """단일 파일 충돌 토론을 동기로 실행. asyncio.to_thread 로 호출됨.
+
+        반환: {'consensus': bool, 'merged': str | None, 'decision': str} 또는 None (예외).
+        """
         from agents.debate import DebatePanel
+        from agents.debate.panel import PERSONAS_FAST
 
         new_agent_dir = self.agents_root / new_agent_id
         try:
-            new_brief = (new_agent_dir / "brief.md").read_text(encoding="utf-8")[:2000]
-            new_delivery = (new_agent_dir / "delivery.md").read_text(encoding="utf-8")[:1500]
+            new_brief = (new_agent_dir / "brief.md").read_text(encoding="utf-8")[:1500]
+            new_delivery = (new_agent_dir / "delivery.md").read_text(encoding="utf-8")[:1000]
         except OSError:
             new_brief = new_delivery = ""
 
-        n = len(valid)
-        # 파일이 많을수록 발췌 짧게 — 전체 컨텍스트 ~12k자 상한.
-        per_file_cap = max(800, 12000 // max(1, n))
-        parts: list[str] = []
-        files_list_lines: list[str] = []
-        for i, (rel_clean, main_path, stash_path) in enumerate(valid, 1):
-            try:
-                main_v = main_path.read_text(encoding="utf-8", errors="ignore")[:per_file_cap]
-                stash_v = stash_path.read_text(encoding="utf-8", errors="ignore")[:per_file_cap]
-            except OSError:
-                continue
-            files_list_lines.append(f"{i}. `{rel_clean}`")
-            parts.append(
-                f"## 파일 {i}/{n}: `{rel_clean}`\n\n"
-                f"### Main 버전 (먼저 머지됨)\n```\n{main_v}\n```\n\n"
-                f"### {new_agent_id} 버전\n```\n{stash_v}\n```\n"
-            )
-        if not parts:
+        try:
+            main_v = main_path.read_text(encoding="utf-8", errors="ignore")[:6000]
+            stash_v = stash_path.read_text(encoding="utf-8", errors="ignore")[:6000]
+        except OSError as e:
+            self._log(f"  ⚠ 충돌 파일 읽기 실패 {rel_clean}: {e}")
             return None
 
         question = (
-            f"멤버 {new_agent_id} 의 {n}개 산출물 충돌. 각 파일마다 (a) main 유지, "
-            f"(b) {new_agent_id} 버전 채택, (c) 통합 — 셋 중 하나 결정. "
-            f"결정 본문은 *파일 번호 + 경로* 로 명확히 구분해 작성 (예: "
-            f"`1. agent_system/lead/main.py: (c) 통합 — 시드 prefix 유지 + 멤버 추가 라인 반영`)."
+            f"파일 `{rel_clean}` 충돌. (a) main 유지 / (b) {new_agent_id} 버전 채택 / "
+            f"(c) 통합 — 셋 중 하나 결정."
         )
         context = (
-            f"# 충돌 파일 목록 ({n}개)\n" + "\n".join(files_list_lines) + "\n\n"
             f"# {new_agent_id} brief\n{new_brief}\n\n"
             f"# {new_agent_id} delivery\n{new_delivery}\n\n"
-            f"# spec 발췌\n{self.spec[:1500]}\n\n"
-            + "\n".join(parts)
+            f"# Main 버전\n```\n{main_v}\n```\n\n"
+            f"# {new_agent_id} 버전\n```\n{stash_v}\n```\n"
         )
-        debate_id = f"goal-conflict-{new_agent_id}-{int(time.time())}"
-        panel = DebatePanel(self.lead_state_dir / "debates", self.llm, max_rounds=2)
+        debate_id = (
+            f"conflict-{new_agent_id}-{rel_clean.replace('/', '_')}-{model}-{int(time.time())}"
+        )
+        panel = DebatePanel(
+            self.lead_state_dir / "debates",
+            self.llm,
+            max_rounds=2,
+            personas=PERSONAS_FAST,
+            model=model,
+        )
+        self.timeline.emit(
+            "lead",
+            "debate_start",
+            agent_id=new_agent_id,
+            file=rel_clean,
+            model=model,
+            debate_id=debate_id,
+        )
         try:
             outcome = panel.deliberate(
-                question=question, context=context,
-                debate_id=debate_id, auto_decide=True,
+                question=question,
+                context=context,
+                debate_id=debate_id,
+                auto_decide=True,
+                integrate_content=True,
+                model=model,
             )
-        except Exception as e:
+        except (RuntimeError, OSError, ValueError) as e:
             self.timeline.emit(
-                "lead", "error",
-                error=f"goal conflict debate: {e}", agent_id=new_agent_id,
+                "lead",
+                "error",
+                error=f"conflict debate ({model}): {e}",
+                agent_id=new_agent_id,
+                file=rel_clean,
             )
             return None
 
+        if outcome.consensus_reached:
+            self.timeline.emit(
+                "lead",
+                "debate_consensus",
+                agent_id=new_agent_id,
+                file=rel_clean,
+                model=model,
+            )
+
+        merged = outcome.integrated_content
+        if merged is None:
+            # 통합 추출 실패 시 기존 추출기로 fallback (panel decision 으로부터 한 번 더 시도)
+            merged = self._extract_merged_file(rel_clean, main_path, stash_path, outcome.decision)
+
+        return {
+            "consensus": outcome.consensus_reached,
+            "merged": merged,
+            "decision": outcome.decision,
+        }
+
+    def _apply_merged(
+        self,
+        new_agent_id: str,
+        rel_clean: str,
+        main_path: Path,
+        stash_path: Path,
+        outcome: dict[str, Any],
+        model: str,
+    ) -> None:
+        """토론 결과 통합본을 main 에 기록하고 stash 정리."""
+        merged = outcome.get("merged")
+        if not isinstance(merged, str):
+            self._log(f"  ⚠ 통합본 없음 → 보존: {rel_clean}")
+            return
+        try:
+            main_path.write_text(merged, encoding="utf-8")
+            stash_path.unlink(missing_ok=True)
+        except OSError as e:
+            self._log(f"  ⚠ 통합본 쓰기 실패 {rel_clean}: {e}")
+            return
+        self._log(f"  ✓ 통합 완료[{model}] {rel_clean}")
         self.timeline.emit(
-            "lead", "conflict_debated",
+            "lead",
+            "conflict_debated",
             agent_id=new_agent_id,
-            file=", ".join(rel for rel, _, _ in valid),  # 호환: 기존 timeline render 가 file 키 사용
-            files=[rel for rel, _, _ in valid],
-            file_count=n,
-            debate_id=debate_id,
+            file=rel_clean,
+            files=[rel_clean],
+            file_count=1,
+            model=model,
+            consensus=bool(outcome.get("consensus")),
         )
-        return outcome.decision
 
     def _extract_merged_file(
         self,
@@ -1094,7 +1845,7 @@ class TeamLead:
         main_path: Path,
         stash_path: Path,
         full_decision: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """전체 결정문에서 해당 파일에 대한 결정만 적용해 통합본 작성. opus 1회."""
         try:
             main_v = main_path.read_text(encoding="utf-8", errors="ignore")
@@ -1119,9 +1870,7 @@ class TeamLead:
         try:
             raw = self.llm.call(system, user, tier="opus")
         except Exception as e:
-            self.timeline.emit(
-                "lead", "error", error=f"merge extract: {e}", file=file_rel
-            )
+            self.timeline.emit("lead", "error", error=f"merge extract: {e}", file=file_rel)
             return None
 
         m = re.search(r"```(?:[a-zA-Z0-9_+\-.]*)\s*\n(.*?)\n```", raw, re.DOTALL)
@@ -1159,6 +1908,7 @@ class TeamLead:
         )
         try:
             from core.llm import parse_json_loose
+
             data = parse_json_loose(self.llm.call(system, user, tier="haiku"))
             decision = bool(data.get("run"))
             self._log(f"  🧹 code-janitor 판단: run={decision} ({data.get('reason', '?')[:60]})")
@@ -1169,6 +1919,7 @@ class TeamLead:
 
     def _run_code_janitor(self) -> None:
         from agents.janitor import CodeJanitor
+
         try:
             janitor = CodeJanitor(
                 self.ws_main,
@@ -1178,19 +1929,21 @@ class TeamLead:
             report = janitor.run()
             self._log(f"  🧹 {report.summary()}")
             self.timeline.emit(
-                "lead", "code_janitor",
-                archived=len(report.archived), kept=len(report.kept),
+                "lead",
+                "code_janitor",
+                archived=len(report.archived),
+                kept=len(report.kept),
                 archive_dir=str(report.archive_dir) if report.archive_dir else "",
             )
         except Exception as e:
             self._log(f"  ⚠ code-janitor 실패: {e}")
             self.timeline.emit("lead", "error", error=f"code-janitor: {e}")
 
-    def _run_evaluator(self, agent_id: str, agent_dir: Path, ws: Path) -> Optional[str]:
+    def _run_evaluator(self, agent_id: str, agent_dir: Path, ws: Path) -> str | None:
         """AdversarialVerifier 1회 호출. FAIL이면 critique 문자열 반환, 아니면 None."""
         try:
             from agents.audit import AdversarialVerifier
-        except Exception as e:
+        except ImportError as e:
             self._log(f"  ⚠ Evaluator import 실패: {e}")
             return None
         delivery = agent_dir / "delivery.md"
@@ -1221,8 +1974,7 @@ class TeamLead:
         if not report.has_fail():
             return None
         return "\n".join(
-            f"[{j.persona}] {j.evidence}" for j in report.judgements
-            if j.verdict == "FAIL"
+            f"[{j.persona}] {j.evidence}" for j in report.judgements if j.verdict == "FAIL"
         )
 
     # ---------- 유틸 ----------
