@@ -17,6 +17,8 @@ stdlib만 사용 (psutil 의존성 없음). macOS는 vm_stat, linux는 /proc/mem
 from __future__ import annotations
 
 import json
+import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -25,6 +27,8 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -91,6 +95,7 @@ class HealthMonitor:
         정상이면 즉시 return. 비정상이면 remediator 호출 + sleep + 재측정.
         max_consecutive_pauses 초과 시 HealthExhausted raise.
         """
+        self._rotate_llm_logs()
         snap = self.snapshot()
         reasons = snap.reasons(self.t)
         if not reasons:
@@ -131,6 +136,64 @@ class HealthMonitor:
             raise HealthExhausted(
                 f"자원 부족 회복 실패 ({','.join(reasons2)}). 원인 로그: {self.incidents_path}"
             )
+
+    def _rotate_llm_logs(self) -> None:
+        """llm_logs 디렉토리 파일 수 cap 가드 (매 check_and_remediate 호출 시 실행).
+
+        AGENT_LLM_LOGS_CAP 환경변수(기본 200)를 초과하면 mtime 기준 오래된 파일부터
+        삭제해 cap의 80% 수준으로 줄인다. cap <= 0이면 비활성화.
+        """
+        try:
+            cap = int(os.environ.get("AGENT_LLM_LOGS_CAP", "200"))
+        except ValueError:
+            cap = 200
+
+        if cap <= 0:
+            return
+
+        for candidate in (
+            self.state_dir / "llm_logs",
+            self.state_dir.parent / "llm_logs",
+        ):
+            self._rotate_one_llm_logs_dir(candidate, cap)
+
+    def _rotate_one_llm_logs_dir(self, llm_logs_dir: Path, cap: int) -> None:
+        if not llm_logs_dir.exists():
+            logger.debug("llm_logs dir not found, skipping: %s", llm_logs_dir)
+            return
+
+        try:
+            files = [p for p in llm_logs_dir.iterdir() if p.is_file()]
+        except OSError as e:
+            logger.debug("llm_logs dir unreadable, skipping: %s (%s)", llm_logs_dir, e)
+            return
+
+        if len(files) <= cap:
+            return
+
+        def _mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return float("inf")  # 읽기 실패 → 최신으로 간주해 보존
+
+        files.sort(key=_mtime)
+
+        target = int(cap * 0.8)
+        to_delete = files[: len(files) - target]
+
+        removed = 0
+        for f in to_delete:
+            if not f.is_file():
+                continue
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+
+        if removed:
+            logger.info("removed %d old llm_logs files (cap=%d)", removed, cap)
 
     def _record_incident(
         self,

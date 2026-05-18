@@ -368,7 +368,11 @@ class TeamLead:
                     except RateLimitExhausted as e:
                         self._log(f"🚫 rate limit 한도: {e}")
                         self._drain_pending()
-                        return 4
+                        # ExitCode.RATE_LIMIT_EXHAUSTED — 더 이상 BUDGET 과 같은 4 가 아님.
+                        # stderr hint 도 함께 흘려 사용자가 다음 행동을 알 수 있게.
+                        from core.exit_codes import ExitCode, print_hint
+                        print_hint(ExitCode.RATE_LIMIT_EXHAUSTED)
+                        return int(ExitCode.RATE_LIMIT_EXHAUSTED)
 
                     self.timeline.render()
 

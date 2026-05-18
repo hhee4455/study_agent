@@ -101,6 +101,7 @@ class DashboardState:
     goals_done_count: int = 0
     conflicts: list[ConflictEntry] = field(default_factory=list)
     budget: BudgetSummary = field(default_factory=BudgetSummary)
+    goals_completed_last_hour: int = 0
 
 
 # ---------- 진입점 (파일 I/O) ----------
@@ -120,6 +121,7 @@ def collect_state(ws_root: Path) -> DashboardState:
     goals_pending, goals_done = _collect_goals(lead_dir / "plan.md")
     conflicts = _collect_conflicts(conflicts_dir)
     budget = _collect_budget(state_dir / "budget.json", lead_dir / "events.jsonl")
+    recent_completions = _count_recent_completions(lead_dir / "agents.json")
 
     return DashboardState(
         generated_at=_now_iso(),
@@ -128,6 +130,7 @@ def collect_state(ws_root: Path) -> DashboardState:
         goals_done_count=goals_done,
         conflicts=conflicts,
         budget=budget,
+        goals_completed_last_hour=recent_completions,
     )
 
 
@@ -138,6 +141,8 @@ def render_dashboard(state: DashboardState) -> str:
     lines.append("")
     lines.append(f"_렌더: {state.generated_at}_")
     lines.append("")
+    lines.extend(_render_summary(state))
+    lines.append("")
     lines.extend(_render_members(state.members))
     lines.append("")
     lines.extend(_render_goals(state.goals_pending, state.goals_done_count))
@@ -145,6 +150,8 @@ def render_dashboard(state: DashboardState) -> str:
     lines.extend(_render_conflicts(state.conflicts))
     lines.append("")
     lines.extend(_render_budget(state.budget))
+    lines.append("")
+    lines.append(_format_eta(len(state.goals_pending), state.goals_completed_last_hour))
     return "\n".join(lines) + "\n"
 
 
@@ -383,6 +390,65 @@ def _aggregate_by_model(events_jsonl: Path) -> dict[str, dict[str, float]]:
     return out
 
 
+def _count_recent_completions(agents_json: Path) -> int:
+    """agents.json 에서 최근 3600초 내 DONE 된 agent(=goal) 수 반환.
+
+    completed_at 타임스탬프가 없거나 파싱 불가인 항목은 집계에서 제외.
+    파일 I/O 오류 발생 시 0 반환 (예외 없음).
+    """
+    cutoff = datetime.now(tz=UTC).timestamp() - 3600.0
+    count = 0
+    if not agents_json.exists():
+        return count
+    try:
+        raw = json.loads(agents_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        _log.warning("agents.json 읽기 실패 (ETA 산정 불가): %s", e)
+        return count
+    if not isinstance(raw, dict):
+        return count
+    for rec in raw.values():
+        if not isinstance(rec, dict):
+            continue
+        if _safe_str(rec.get("status"), "") != "DONE":
+            continue
+        completed_at = rec.get("completed_at")
+        if not isinstance(completed_at, str) or not completed_at:
+            continue
+        ts = _started_at_to_unix(completed_at)
+        if ts > cutoff:
+            count += 1
+    return count
+
+
+def _format_eta(pending: int, completed_last_hour: int) -> str:
+    """최근 1h 완료 속도 기반 ETA 문자열 반환. 속도 0·데이터 부족 시 fallback.
+
+    pending  : 남은 goal 수
+    completed_last_hour : 최근 1h 내 완료된 goal 수 (= rate goals/h)
+    """
+    try:
+        if pending < 0 or completed_last_hour <= 0:
+            return "ETA: 산정 불가 (최근 1h 진행 없음)"
+        if pending == 0:
+            return "ETA: ~0m (모든 goal 완료)"
+        eta_h = pending / completed_last_hour
+        h = int(eta_h)
+        m = int(round((eta_h - h) * 60))
+        if m == 60:
+            h += 1
+            m = 0
+        if h > 0 and m > 0:
+            eta_str = f"~{h}h {m}m"
+        elif h > 0:
+            eta_str = f"~{h}h"
+        else:
+            eta_str = f"~{max(1, m)}m"
+        return f"ETA: {eta_str} (최근 1h 기준 {completed_last_hour} goals/h)"
+    except Exception:
+        return "ETA: 산정 불가 (최근 1h 진행 없음)"
+
+
 def _last_msg_ts(mailbox_md: Path) -> str:
     """mailbox.md 의 마지막 메시지 ts (최대 id 의 ts)."""
     if not mailbox_md.exists():
@@ -406,6 +472,39 @@ def _last_msg_ts(mailbox_md: Path) -> str:
 
 
 # ---------- 렌더 helpers (순수) ----------
+
+
+def _goal_progress_bar(done: int, total: int) -> str:
+    """10칸 고정 진행률 바: █ (U+2588) 채움 / ░ (U+2591) 빈칸."""
+    if total == 0:
+        return "░░░░░░░░░░ 0/0"
+    filled = round(done / total * 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    pct = int(done / total * 100)
+    return f"{bar} {done}/{total} ({pct}%)"
+
+
+def _render_summary(state: DashboardState) -> list[str]:
+    """Goals 진행률 바 + 모델별 비용 합계 표 (by_model)."""
+    total = len(state.goals_pending) + state.goals_done_count
+    bar = _goal_progress_bar(state.goals_done_count, total)
+
+    lines: list[str] = ["## Summary", ""]
+    lines.append(f"Goals: {bar}")
+    lines.append("")
+
+    by_model = state.budget.by_model
+    if by_model:
+        lines.append("| Model | Cost (USD) | Tokens |")
+        lines.append("| --- | ---: | ---: |")
+        for model in sorted(by_model.keys()):
+            d = by_model[model]
+            tokens = int(d.get("tokens_in", 0)) + int(d.get("tokens_out", 0))
+            lines.append(f"| {model} | ${d.get('cost_usd', 0.0):.4f} | {tokens:,} |")
+    else:
+        lines.append("_no model usage yet_")
+
+    return lines
 
 
 def _render_members(rows: list[MemberRow]) -> list[str]:

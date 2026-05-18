@@ -24,17 +24,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.budget import BudgetExceeded, BudgetLimits, BudgetManager
 from core.cli_caller import make_codex_raw_factory, make_raw_llm_factory
+from core.exit_codes import ExitCode, print_hint
 from core.health import HealthExhausted, HealthMonitor
 from core.llm import LLMClient
+from core.rate_limit import RateLimitExhausted, ServerError
 from lead.team_lead import TeamLead
 
-EXIT_OK = 0
-EXIT_NO_PROGRESS = 3
-EXIT_BUDGET = 4
+# 종료 코드는 core.exit_codes.ExitCode 가 단일 진실 — 아래 상수는 기존 호출자와의
+# 호환을 위한 alias. 신규 코드는 ExitCode 를 직접 쓰는 것을 권장.
+EXIT_OK = int(ExitCode.OK)
+EXIT_NO_PROGRESS = int(ExitCode.NO_PROGRESS)
+EXIT_BUDGET = int(ExitCode.BUDGET_EXCEEDED)
 EXIT_HUMAN_NEEDED = 5
-EXIT_CLAUDE_MISSING = 6
-EXIT_HEALTH = 7
-EXIT_INTERRUPT = 130
+EXIT_CLAUDE_MISSING = int(ExitCode.AUTH_FAILURE)
+EXIT_HEALTH = int(ExitCode.HEALTH_EXHAUSTED)
+EXIT_INTERRUPT = int(ExitCode.INTERRUPTED)
 
 # graceful shutdown 시 in-flight spawn 마무리 대기 한도 (초). 30s 가 한 멤버
 # 사이클 자연 종료 충분치 — 초과 시 강제 종료 + 경고.
@@ -132,7 +136,8 @@ def main() -> int:
     spec_path = Path(args.spec).resolve()
     if not spec_path.exists():
         print(f"❌ spec 파일 없음: {spec_path}", file=sys.stderr)
-        return 1
+        print_hint(ExitCode.SPEC_NOT_FOUND)
+        return int(ExitCode.SPEC_NOT_FOUND)
     spec = spec_path.read_text(encoding="utf-8")
     spec_name = spec_path.name
 
@@ -201,16 +206,31 @@ def main() -> int:
     lead.restore_state()
 
     try:
-        return lead.run()
+        rc = lead.run()
+        # run() 이 정수를 반환했을 때(예: NO_PROGRESS) 도 사용자 가이드 한 줄 동봉.
+        if rc and rc != int(ExitCode.OK):
+            print_hint(rc)
+        return rc
     except BudgetExceeded as e:
         print(f"\n💰 {e}", flush=True)
-        return EXIT_BUDGET
+        print_hint(ExitCode.BUDGET_EXCEEDED)
+        return int(ExitCode.BUDGET_EXCEEDED)
+    except RateLimitExhausted as e:
+        print(f"\n🚦 {e}", flush=True)
+        print_hint(ExitCode.RATE_LIMIT_EXHAUSTED)
+        return int(ExitCode.RATE_LIMIT_EXHAUSTED)
+    except ServerError as e:
+        print(f"\n🛠️  {e}", flush=True)
+        print_hint(ExitCode.SERVER_ERROR)
+        return int(ExitCode.SERVER_ERROR)
     except HealthExhausted as e:
         print(f"\n🏥 {e}", flush=True)
-        return EXIT_HEALTH
+        print_hint(ExitCode.HEALTH_EXHAUSTED)
+        return int(ExitCode.HEALTH_EXHAUSTED)
     except KeyboardInterrupt:
         print("\n⏹️  사용자 중단", flush=True)
-        return EXIT_INTERRUPT
+        print_hint(ExitCode.INTERRUPTED)
+        return int(ExitCode.INTERRUPTED)
     finally:
         # 정상/예외/시그널 어떤 경로로 빠져나오든 in-flight spawn 30s grace drain.
         # 큐의 남은 충돌은 디스크에 보존 → 다음 run 의 restore_state 가 픽업.

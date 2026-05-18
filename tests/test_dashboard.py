@@ -388,3 +388,159 @@ def test_dashboard_corrupt_agents_json_falls_back_to_disk_scan(tmp_path: Path) -
     found = [m for m in state.members if m.agent_id == "M050"]
     assert len(found) == 1
     assert found[0].status == "DONE"
+
+
+# ---------------------------------------------------------------------------
+# M005 신규 추가 — 진행률 바 / 모델별 비용 표 렌더링 검증
+# ---------------------------------------------------------------------------
+
+
+def test_progress_bar_7_of_10() -> None:
+    """goals 7/10 → ███████░░░ 7/10 문자열이 출력에 포함."""
+    state = DashboardState(
+        generated_at="2026-05-18T00:00:00Z",
+        goals_pending=[GoalRow(f"G-{i:02d}", f"goal {i}", "", False) for i in range(3)],
+        goals_done_count=7,
+    )
+    md = render_dashboard(state)
+    assert "███████░░░ 7/10" in md
+
+
+def test_progress_bar_zero_of_zero() -> None:
+    """0/0 일 때 깨지지 않고 빈 바 렌더."""
+    state = DashboardState(
+        generated_at="2026-05-18T00:00:00Z",
+        goals_pending=[],
+        goals_done_count=0,
+    )
+    md = render_dashboard(state)
+    assert "0/0" in md
+    assert "░░░░░░░░░░" in md
+
+
+def test_model_cost_table_two_models() -> None:
+    """sonnet/opus 두 종류일 때 두 행이 모두 출력에 포함."""
+    budget = BudgetSummary(
+        cost_usd=0.5,
+        by_model={
+            "sonnet": {"cost_usd": 0.10, "tokens_in": 500.0, "tokens_out": 200.0, "calls": 2.0},
+            "opus": {"cost_usd": 0.40, "tokens_in": 1000.0, "tokens_out": 500.0, "calls": 1.0},
+        },
+    )
+    state = DashboardState(generated_at="2026-05-18T00:00:00Z", budget=budget)
+    md = render_dashboard(state)
+    assert "sonnet" in md
+    assert "opus" in md
+
+
+def test_model_cost_empty_shows_placeholder() -> None:
+    """비용 데이터가 비어있을 때 placeholder 가 표시되고 예외 없이 렌더."""
+    state = DashboardState(
+        generated_at="2026-05-18T00:00:00Z",
+        budget=BudgetSummary(),
+    )
+    md = render_dashboard(state)
+    assert "_no model usage yet_" in md
+
+
+# ---------------------------------------------------------------------------
+# M006 신규 추가 — ETA 계산/렌더 케이스 (정상/0속도/데이터부족) 회귀 테스트
+# ---------------------------------------------------------------------------
+
+
+def test_eta_normal_rate() -> None:
+    """최근 1h 에 4 goals 완료, 남은 9 goals → ETA ~2h 15m (최근 1h 기준 4 goals/h)."""
+    state = DashboardState(
+        generated_at="2026-05-18T00:00:00Z",
+        goals_pending=[GoalRow(f"G-{i:02d}", f"goal {i}", "", False) for i in range(9)],
+        goals_done_count=4,
+        goals_completed_last_hour=4,
+    )
+    md = render_dashboard(state)
+    assert "ETA:" in md
+    assert "4 goals/h" in md
+    # 9 / 4 = 2.25h → ~2h 15m
+    assert "2h" in md
+    assert "15m" in md
+
+
+def test_eta_zero_rate_fallback() -> None:
+    """최근 1h 진행 0 → ETA 산정 불가 fallback."""
+    state = DashboardState(
+        generated_at="2026-05-18T00:00:00Z",
+        goals_pending=[GoalRow("G-01", "pending", "", False)],
+        goals_done_count=0,
+        goals_completed_last_hour=0,
+    )
+    md = render_dashboard(state)
+    assert "ETA: 산정 불가 (최근 1h 진행 없음)" in md
+
+
+def test_eta_empty_state_graceful() -> None:
+    """빈 state(goals 없음, 최근 완료 없음)에서도 ETA 라인이 graceful 렌더."""
+    state = DashboardState(
+        generated_at="2026-05-18T00:00:00Z",
+    )
+    md = render_dashboard(state)
+    assert "ETA:" in md
+    assert "산정 불가" in md
+
+
+def test_eta_all_goals_done() -> None:
+    """남은 goal 없고 (R=0) 최근 완료 있음 → ~0m 렌더."""
+    state = DashboardState(
+        generated_at="2026-05-18T00:00:00Z",
+        goals_pending=[],
+        goals_done_count=5,
+        goals_completed_last_hour=3,
+    )
+    md = render_dashboard(state)
+    assert "ETA:" in md
+    assert "~0m" in md
+
+
+def test_eta_collect_recent_completions(tmp_path: Path) -> None:
+    """agents.json 에 최근 1h 내 DONE 된 agent 가 있으면 goals_completed_last_hour 에 반영."""
+    import time
+
+    state_dir = tmp_path / "state"
+    lead_dir = state_dir / "lead"
+    lead_dir.mkdir(parents=True)
+
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    (lead_dir / "agents.json").write_text(
+        json.dumps({
+            "M010": {
+                "status": "DONE",
+                "goal_id": "G-recent",
+                "completed_at": now_iso,
+                "cost_usd": 0.1,
+            },
+            "M011": {
+                "status": "DONE",
+                "goal_id": "G-old",
+                "completed_at": "2020-01-01T00:00:00Z",
+                "cost_usd": 0.2,
+            },
+            "M012": {
+                "status": "RUNNING",
+                "goal_id": "G-active",
+                "completed_at": "",
+                "cost_usd": 0.0,
+            },
+        })
+    )
+
+    s = collect_state(tmp_path)
+    # M010 만 최근 1h 내 완료 (M011은 2020년, M012는 RUNNING)
+    assert s.goals_completed_last_hour == 1
+
+
+def test_eta_token_present_in_dashboard_py() -> None:
+    """dashboard.py 소스에 'ETA' 토큰이 존재하는지 파일 수준 검증."""
+    import importlib.util
+
+    src = Path(__file__).resolve().parent.parent / "lead" / "dashboard.py"
+    assert src.exists(), "dashboard.py 가 존재해야 함"
+    text = src.read_text(encoding="utf-8")
+    assert "ETA" in text, "dashboard.py 에 ETA 토큰이 없음"

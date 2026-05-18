@@ -15,11 +15,16 @@ raw 데이터 (보존):
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+_INACTIVE_STATUSES: frozenset[str] = frozenset({"DONE", "FAILED"})
+_GOAL_DONE_RE = re.compile(r"^- \[([xX])\]")
+_GOAL_ANY_RE = re.compile(r"^- \[[ xX]\]")
 
 
 @dataclass
@@ -87,7 +92,21 @@ class TimelineRenderer:
                         return True
         return False
 
-    def render(self) -> Path:
+    def render(
+        self,
+        *,
+        member_states: dict[str, str] | None = None,
+        started_at: datetime | None = None,
+    ) -> Path:
+        """타임라인 재렌더. 입력이 변경되지 않으면 skip.
+
+        Example output (summary line):
+            > 2/3 goals 완료 · 1명 active · 경과 2시간
+
+        Args:
+            member_states: {agent_id: status} 딕셔너리. None 이면 agents_root 디스크에서 읽음.
+            started_at: 팀장 시작 시각(UTC). None 이면 events.jsonl 첫 이벤트 ts로 추정.
+        """
         if not self._needs_rerender():
             return self.timeline_path
         entries: list[TimelineEntry] = []
@@ -97,7 +116,8 @@ class TimelineRenderer:
 
         entries.sort(key=lambda e: (e.ts, e.actor))
 
-        lines = ["# Timeline", "", f"_렌더: {_now_iso()}_", ""]
+        summary = self._build_summary_line(member_states, started_at)
+        lines = ["# Timeline", summary, "", f"_렌더: {_now_iso()}_", ""]
         last_actor = None
         for e in entries:
             if e.actor != last_actor:
@@ -107,6 +127,65 @@ class TimelineRenderer:
             lines.append(f"- `{e.ts}` {e.icon} {e.text}")
         self.timeline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return self.timeline_path
+
+    def _build_summary_line(
+        self,
+        member_states: dict[str, str] | None,
+        started_at: datetime | None,
+    ) -> str:
+        """'X/Y goals 완료 · M명 active · 경과 H시간' 형식의 요약 라인."""
+        # goals: plan.md 파싱
+        done_goals, total_goals = 0, 0
+        plan_path = self.lead_state_dir / "plan.md"
+        if plan_path.exists():
+            for line in plan_path.read_text(encoding="utf-8").splitlines():
+                if _GOAL_ANY_RE.match(line):
+                    total_goals += 1
+                    if _GOAL_DONE_RE.match(line):
+                        done_goals += 1
+
+        # active 멤버: kwarg 우선, 없으면 agents_root status 파일 읽기
+        if member_states is not None:
+            active_count = sum(1 for s in member_states.values() if s not in _INACTIVE_STATUSES)
+        else:
+            active_count = 0
+            if self.agents_root.exists():
+                for agent_dir in self.agents_root.iterdir():
+                    if not agent_dir.is_dir():
+                        continue
+                    sf = agent_dir / "status"
+                    st = sf.read_text(encoding="utf-8").strip() if sf.exists() else "HIRED"
+                    if st not in _INACTIVE_STATUSES:
+                        active_count += 1
+
+        # 경과 시간: kwarg 우선, 없으면 events.jsonl 첫 ts 로 추정
+        if started_at is None:
+            started_at = self._infer_started_at()
+        if started_at is not None:
+            delta_sec = max(0, (datetime.now(UTC) - started_at).total_seconds())
+            total_min = int(delta_sec / 60)
+            elapsed = f"{total_min // 60}시간" if total_min >= 60 else f"{total_min}분"
+        else:
+            elapsed = "?분"
+
+        return f"> {done_goals}/{total_goals} goals 완료 · {active_count}명 active · 경과 {elapsed}"
+
+    def _infer_started_at(self) -> datetime | None:
+        """events.jsonl 첫 번째 레코드의 ts 로 시작 시각 추정."""
+        if not self.events_path.exists():
+            return None
+        for line in self.events_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                ts = e.get("ts", "")
+                if ts:
+                    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return None
 
     # ---- 소스별 파싱 ----
 

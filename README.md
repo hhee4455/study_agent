@@ -138,6 +138,34 @@ python -m lead.main \
   --enable-evaluator   # 비용 ↑ 품질 ↑ (각 멤버 산출물에 회의주의 1 cycle)
 ```
 
+### CLI Flags
+
+| Flag | 기본값 | 설명 |
+|------|--------|------|
+| `--spec` | *(필수)* | 요구서 `.md` 파일 경로 |
+| `--workspace` | *(필수)* | 메인 워크스페이스 경로 (`ws/main`) |
+| `--checkpoint` | *(필수)* | 런타임 상태 저장 디렉토리 |
+| `--max-parallel N` | `3` | 동시 실행 팀원 수. 클수록 속도 ↑ but burst rate limit · 충돌 ↑. `1`=직렬 안전 모드 |
+| `--enable-evaluator` | `false` | 각 멤버 산출물에 AdversarialVerifier 1 cycle 추가 (비용 ↑, 품질 ↑) |
+| `--replan` | `false` | 기존 `plan.md`를 `plan.replaced-{ts}.md`로 archive 후 새 spec으로 재분해. spec 변경 시 사용 |
+| `--skip-preflight` | `false` | 시작 시 claude CLI 설치·로그인 확인 건너뜀. 빠른 재시작 또는 CI 환경용 |
+| `--max-hours H` | `12.0` | 최대 실행 시간(시간 단위). 초과 시 exit code 4 |
+| `--max-turns N` | `2000` | 전체 tick 루프 최대 횟수. 초과 시 exit code 4 |
+| `--max-cost-usd N` | `∞` | 최대 누적 API 비용(USD). 초과 시 exit code 4 |
+| `--model M` | `opus` | 팀장 의사결정 기본 모델 (`opus` / `sonnet` / `haiku`) |
+
+**예시:**
+
+```
+# 직렬 안전 모드 + 평가자 활성화 (2시간 한도)
+python -m lead.main --spec project.md --workspace ws/main --checkpoint state \
+  --max-parallel 1 --enable-evaluator --max-hours 2
+
+# spec 변경 후 plan 재분해 (preflight 생략)
+python -m lead.main --spec project.md --workspace ws/main --checkpoint state \
+  --replan --skip-preflight --max-parallel 2
+```
+
 ## 종료 코드
 
 | 코드 | 의미 |
@@ -147,6 +175,30 @@ python -m lead.main \
 | 4    | budget(시간/턴) 한도 또는 rate limit 한도 |
 | 6    | claude CLI 미설치/로그인 안 됨 |
 | 130  | 사용자 중단 |
+
+## 문제 해결 (Troubleshooting)
+
+### 증상별 빠른 진단
+
+| 증상 | 원인 | 권장 조치 |
+|------|------|-----------|
+| 시스템이 멈추고 exit code 3 ("진행 가능 작업 없음" = 진행 정지) | 10회 연속 tick에서 상태 변화 없음 — 모든 goal이 WAITING이거나 실행 가능 멤버 없음 | `state/lead/timeline.md`로 최근 tick 확인 → WAITING 멤버의 `mailbox.md` 질문에 직접 답변 후 재실행. plan 자체가 소진된 경우 `--replan`으로 재분해 |
+| `plan.md`가 비어있거나 goal이 생성되지 않음 (빈 plan / empty plan) | spec(`project.md`) 내용이 너무 짧거나 불명확 → LLM이 sub-goal 분해 실패 | `project.md` 내용 보완 후 `./scripts/reset.sh --apply`로 상태 초기화 → 재실행 시 `--replan` 추가 |
+| 동일 멤버가 WAITING → 재spawn → WAITING을 반복 (member 무한 루프 / infinite loop) | 팀장 자동 답변이 멤버 질문을 해소하지 못하거나, brief 검증 기준이 달성 불가능 | `state/agents/{agent_id}/mailbox.md` 직접 확인 → 질문이 모호하면 brief 수정 또는 `--max-turns`를 낮춰 자연 종료 유도 |
+| `ws/main/`에 `.from-{agent_id}` 파일이 누적 (conflict 누적) | 두 멤버가 같은 파일을 동시 수정 → 자동 3-way 머지 없음, 충돌 파일 보존 방식 | `ws/main/conflicts/{ts}.md` 보고서 확인 → 충돌 파일 직접 수정 후 `.from-{agent_id}` 제거. 재발 방지는 `--max-parallel 1`로 직렬 실행 |
+| exit code 6 또는 stderr에 "claude CLI 미설치/로그인 안 됨" (인증 실패 / auth failure) | `claude` CLI가 PATH에 없거나 `claude login`이 미완료 | `claude login`으로 재인증 → `claude -p "ping"`으로 동작 확인. 미설치 시 `npm i -g @anthropic-ai/claude-code`. 빠른 재시작 시 `--skip-preflight` 가능 (단, 런타임에서 같은 오류 재발 가능) |
+
+### CLI Flag 요약
+
+| Flag | 기본값 | 설명 |
+|------|--------|------|
+| `--max-parallel` | `3` | 동시 실행 팀원 수. 클수록 속도 ↑ but burst rate limit · 충돌 ↑. `1`=직렬 안전 모드 |
+| `--enable-evaluator` | `false` | 각 멤버 산출물에 AdversarialVerifier 1 cycle 추가 (비용 ↑, 품질 ↑) |
+| `--replan` | `false` | 기존 `plan.md`를 `plan.replaced-{ts}.md`로 archive 후 새 spec으로 재분해. spec 변경 시 사용 |
+| `--skip-preflight` | `false` | 시작 시 claude CLI 설치/로그인 확인 건너뜀. 빠른 재시작 또는 CI 환경용 |
+| `--max-turns` | `2000` | 전체 tick 루프 최대 횟수. 초과 시 exit code 4 |
+| `--max-hours` | `12.0` | 최대 실행 시간(시간 단위). 초과 시 exit code 4 |
+| `--max-cost-usd` | `∞` | 최대 누적 API 비용(USD). 초과 시 exit code 4 |
 
 ## 테스트
 
