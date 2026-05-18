@@ -20,3 +20,10 @@ def test_skip_dirs_covers_frontend_node_modules() -> None:
 
 def test_skip_dirs_covers_frontend_dist() -> None:
     assert any("web/frontend/dist" in s for s in SKIP_DIRS)
+
+
+def test_root_friendly_error_when_no_static() -> None:
+    """When static dir absent (test env), GET / returns 503 with build guide."""
+    r = client.get("/")
+    assert r.status_code == 503
+    assert "scripts/web-venv.sh build" in r.text

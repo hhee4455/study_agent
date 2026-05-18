@@ -1,3 +1,4 @@
+import './styles/tokens.css'
 import { Routes, Route, Link, useLocation } from 'react-router-dom'
 
 import Kanban from './pages/Kanban'
@@ -8,6 +9,7 @@ import Debates from './pages/Debates'
 import DebateDetail from './pages/DebateDetail'
 import LLMCalls from './pages/LLMCalls'
 import LLMCallDetail from './pages/LLMCallDetail'
+import Conflicts from './pages/Conflicts'
 import LiveTimeline from './components/LiveTimeline'
 
 const NAV = [
@@ -16,6 +18,7 @@ const NAV = [
   { to: '/cost', label: 'Cost', match: (p: string) => p.startsWith('/cost') },
   { to: '/debates', label: 'Debates', match: (p: string) => p.startsWith('/debates') },
   { to: '/llm-calls', label: 'LLM Calls', match: (p: string) => p.startsWith('/llm-calls') },
+  { to: '/conflicts', label: 'Conflicts', match: (p: string) => p.startsWith('/conflicts') },
 ]
 
 function Nav() {
@@ -32,8 +35,8 @@ function Nav() {
                 to={item.to}
                 style={{
                   ...linkStyle,
-                  background: active ? '#1f6feb' : 'transparent',
-                  color: active ? '#fff' : '#9aa4b2',
+                  background: active ? 'var(--color-accent)' : 'transparent',
+                  color: active ? 'var(--color-text-on-accent)' : 'var(--color-text-muted)',
                 }}
               >
                 {item.label}
@@ -47,7 +50,7 @@ function Nav() {
 }
 
 function NotFound() {
-  return <div style={{ padding: 24, color: '#9aa4b2' }}>404 — 페이지 없음</div>
+  return <div style={{ padding: 24, color: 'var(--color-text-muted)' }}>404 — 페이지 없음</div>
 }
 
 export default function App() {
@@ -65,6 +68,7 @@ export default function App() {
             <Route path="/debates/:id" element={<DebateDetail />} />
             <Route path="/llm-calls" element={<LLMCalls />} />
             <Route path="/llm-calls/:filename" element={<LLMCallDetail />} />
+            <Route path="/conflicts" element={<Conflicts />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </div>
@@ -78,8 +82,8 @@ export default function App() {
 
 const appStyle: React.CSSProperties = {
   minHeight: '100vh',
-  background: '#0d1117',
-  color: '#e6edf3',
+  background: 'var(--color-bg)',
+  color: 'var(--color-text)',
   fontFamily:
     '-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,Arial,sans-serif',
 }
@@ -89,8 +93,8 @@ const navStyle: React.CSSProperties = {
   alignItems: 'center',
   gap: 24,
   padding: '12px 24px',
-  borderBottom: '1px solid #21262d',
-  background: '#010409',
+  borderBottom: '1px solid var(--color-border)',
+  background: 'var(--color-surface)',
   position: 'sticky',
   top: 0,
   zIndex: 10,
@@ -100,7 +104,7 @@ const brandStyle: React.CSSProperties = {
   fontWeight: 600,
   fontSize: 14,
   letterSpacing: 0.3,
-  color: '#e6edf3',
+  color: 'var(--color-text)',
 }
 
 const navListStyle: React.CSSProperties = {
@@ -133,7 +137,7 @@ const contentStyle: React.CSSProperties = {
 }
 
 const asideStyle: React.CSSProperties = {
-  borderLeft: '1px solid #21262d',
-  background: '#010409',
+  borderLeft: '1px solid var(--color-border)',
+  background: 'var(--color-surface)',
   minWidth: 0,
 }

@@ -1,0 +1,167 @@
+.overview-page {
+  padding: 1.5rem;
+  color: var(--text);
+}
+
+.overview-title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-bottom: 1.5rem;
+  color: var(--text);
+}
+
+/* KPI Grid */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.kpi-card--running  { border-left-color: var(--accent); }
+.kpi-card--waiting  { border-left-color: var(--warning); }
+.kpi-card--done     { border-left-color: var(--success); }
+.kpi-card--failed   { border-left-color: var(--danger); }
+.kpi-card--cost     { border-left-color: var(--accent); }
+.kpi-card--conflict { border-left-color: var(--danger); }
+.kpi-card--eta      { border-left-color: var(--text-muted); }
+
+.kpi-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1;
+}
+
+.kpi-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+/* Sections */
+.overview-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.overview-section h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 1rem;
+}
+
+.overview-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 0.9rem;
+}
+
+/* Heatmap */
+.heatmap-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow-x: auto;
+}
+
+.heatmap-hours,
+.heatmap-row {
+  display: grid;
+  grid-template-columns: 3rem repeat(24, 1fr);
+  gap: 3px;
+  align-items: center;
+}
+
+.heatmap-spacer {
+  display: block;
+}
+
+.heatmap-hour-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.heatmap-day-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-align: right;
+  padding-right: 0.5rem;
+  white-space: nowrap;
+}
+
+.heatmap-cell {
+  height: 18px;
+  background: var(--accent);
+  border-radius: 2px;
+  cursor: default;
+  transition: opacity 0.12s;
+}
+
+.heatmap-cell:hover {
+  outline: 1px solid var(--text-muted);
+}
+
+/* ETA List */
+.eta-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.eta-item {
+  display: grid;
+  grid-template-columns: 5rem 1fr 5rem 4rem;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.eta-agent {
+  font-weight: 700;
+  color: var(--accent);
+  font-family: monospace;
+}
+
+.eta-goal {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eta-cost {
+  text-align: right;
+  color: var(--text);
+}
+
+.eta-time {
+  text-align: right;
+  font-weight: 600;
+  color: var(--warning);
+}

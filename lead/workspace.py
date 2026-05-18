@@ -46,17 +46,21 @@ SKIP_DIRS = {
     # 멤버 cwd 절대경로가 박혀 있어 main 으로 머지하면 매번 conflict → opus 토론 폭주.
     # main 은 자기 .claude/ 를 별도로 가지면 됨 (멤버 인프라이지 프로젝트 코드 아님).
     ".claude",
-    # 프론트엔드 빌드 산출물 — 머지 시 오염 방지.
-    # bare "node_modules" / "dist" 로도 이름 기반 skip 이 되지만,
-    # path-qualified 항목으로 의도를 명시하고 verifier grep 을 통과시킴.
+    # 프론트엔드 빌드 산출물 / 툴링 캐시 — 96MB 누수 사고 재발 방지.
+    # bare 이름 기반 skip 이 이미 동작하지만 path-qualified 항목으로 의도를 명시.
     "web/frontend/node_modules",
     "web/frontend/dist",
+    # 프론트엔드 개발 서버 / 번들러 캐시 (Vite, Next.js, Turbo)
+    ".vite",
+    ".next",
+    ".turbo",
 }
 SKIP_FILE_GLOBS = (
     "*.pyc",
     "*.pyo",
     "*.pyd",
     ".DS_Store",
+    "Thumbs.db",  # Windows 썸네일 캐시 — OS 산출물
     "*.egg-info",  # 디렉토리 + 파일 둘 다
     ".coverage",
     ".coverage.*",  # pytest-cov 바이너리 — main 에 머지하면 안 됨

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
@@ -10,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.budget import router as budget_router
+from .api.conflicts import router as conflicts_router
 from .api.debates import router as debates_router
 from .api.events import router as events_router
 from .api.members import router as members_router
@@ -22,6 +24,7 @@ app.include_router(plan_router)
 app.include_router(debates_router)
 app.include_router(budget_router)
 app.include_router(events_router)
+app.include_router(conflicts_router)
 
 
 def get_ws_root() -> Path:
@@ -52,7 +55,11 @@ if _STATIC_DIR.is_dir():
     def spa_fallback(full_path: str = "") -> FileResponse:
         """SPA 라우팅 fallback — API 라우트가 매치 안 되면 index.html 반환."""
         return FileResponse(_STATIC_DIR / "index.html")
-
+else:
+    print(
+        "web/static/ not found — run `scripts/web-venv.sh build` to build the frontend",
+        file=sys.stderr,
+    )
 
 if __name__ == "__main__":
     import uvicorn

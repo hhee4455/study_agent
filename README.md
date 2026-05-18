@@ -212,6 +212,73 @@ Integration test는 stub LLM + stub spawner로 전체 cycle 검증:
 - `test_team_lead_question_reply_cycle`: 첫 spawn WAITING+question → reply → 재spawn DONE
 - `test_team_lead_member_failed`: spawn FAILED → registry 갱신 → 진행 정체로 종료
 
+## Web 대시보드 설치/빌드
+
+> **예정 인터페이스** — `scripts/web-venv.sh`는 현재 구현 중. 아래 명령명과 동작은 확정된 인터페이스이며, 스크립트 완성 전까지는 `npm ci` / `npm run build`로 직접 대체 가능.
+
+### 사전 요구사항 — Node 버전 핀
+
+`package.json`의 `engines` 필드로 Node 버전이 고정되어 있으며, Corepack으로 npm 버전까지 핀됩니다.
+
+```bash
+corepack enable
+```
+
+이후 모든 `npm` 호출이 자동으로 올바른 버전을 사용합니다. Node 버전 불일치 오류 발생 시 `corepack enable`을 다시 실행하세요.
+
+### `scripts/web-venv.sh` 사용법
+
+Python `venv`처럼 한 명령으로 의존성 라이프사이클을 관리합니다.
+
+| 명령 | 동작 |
+|------|------|
+| `scripts/web-venv.sh setup` | `node_modules/` clean install |
+| `scripts/web-venv.sh build` | production build → `web/static/` 생성 |
+| `scripts/web-venv.sh dev` | Vite dev 서버 시작 |
+| `scripts/web-venv.sh reset` | `node_modules/`, `.vite/`, `web/static/` 제거 후 재설치 |
+
+**clone 직후 필수 순서:**
+
+```bash
+scripts/web-venv.sh setup   # node_modules/ 설치
+scripts/web-venv.sh build   # web/static/ 생성 (FastAPI 서빙 필수)
+```
+
+개발 시 핫 리로드:
+
+```bash
+scripts/web-venv.sh dev     # Vite dev 서버 (http://localhost:5173)
+```
+
+의존성 꼬임 해결:
+
+```bash
+scripts/web-venv.sh reset   # node_modules/, .vite/, web/static/ 전부 제거 후 재설치
+scripts/web-venv.sh build   # 이후 빌드 별도 실행 필요
+```
+
+### `web/static/` untrack 정책
+
+`web/static/`은 빌드 산출물이므로 `.gitignore`에 포함되어 git에서 추적하지 않습니다. **clone 직후 반드시 `scripts/web-venv.sh build`를 실행**해야 FastAPI 서버가 `index.html`과 JS 번들을 서빙할 수 있습니다. 이 단계를 건너뛰면 대시보드 접속 시 404가 반환됩니다.
+
+### 파생 디렉터리 머지 금지
+
+아래 디렉터리는 `.gitignore` 처리되어 있으며, `lead/workspace.py` 머지 화이트리스트에서도 차단됩니다. 멤버 워크스페이스(`ws/members/`)에 생성되더라도 `ws/main`으로 들어가지 않습니다.
+
+- `node_modules/`
+- `.vite/`
+- `dist/`
+- `__pycache__/`
+- `.mypy_cache/`
+
+### 트러블슈팅
+
+| 증상 | 원인 | 조치 |
+|------|------|------|
+| FastAPI가 `web/static/index.html` 없음 오류 | clone 후 빌드를 건너뜀 | `scripts/web-venv.sh build` 실행 |
+| `npm` 실행 시 "Unsupported engine" 또는 Node 버전 오류 | Node 버전 불일치 | `corepack enable` 재실행 후 재시도 |
+| `scripts/web-venv.sh: No such file or directory` | 스크립트 실행 권한 없음 | `chmod +x scripts/web-venv.sh` 후 재실행 |
+
 ## 알려진 한계
 
 1. **검증기는 객관적**: shell exit / file_exists / file_contains만. 시맨틱 정확도는 보장 못 함. `--enable-evaluator`로 보완 가능하나 비용 증가.

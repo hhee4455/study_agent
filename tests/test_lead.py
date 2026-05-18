@@ -696,6 +696,80 @@ def test_workspace_merge_skips_dot_claude_hook_settings():
         assert ".claude" in set(rep.skipped_pattern)
 
 
+# ---------- merge guard — 파생 디렉터리/OS 산출물 차단 (96MB 누수 사고 재발 방지) ----------
+
+
+def test_workspace_merge_guard_blocks_derived_and_os_artifacts():
+    """멤버 ws 에 파생 디렉터리/OS 산출물이 있어도 ws/main 으로 절대 머지되지 않음.
+
+    차단 대상: .vite / .next / .turbo / dist / build / node_modules / __pycache__ /
+              *.egg-info / .mypy_cache / .pytest_cache / .DS_Store / Thumbs.db
+    정상 파일(web/frontend/src/foo.tsx)은 머지됨 (positive + negative 동시 검증).
+    """
+    from lead.workspace import WorkspaceMerger
+
+    with tempfile.TemporaryDirectory() as d:
+        main = Path(d) / "main"
+        member = Path(d) / "M001"
+        conflicts = Path(d) / "conflicts"
+        main.mkdir()
+        member.mkdir()
+
+        # --- 차단 대상 디렉터리 (최상위) ---
+        blocked_dirs = [".vite", ".next", ".turbo", "dist", "build", "__pycache__", ".mypy_cache", ".pytest_cache"]
+        for dname in blocked_dirs:
+            (member / dname).mkdir()
+            (member / dname / "artifact.js").write_text("generated")
+
+        # --- *.egg-info 디렉터리 ---
+        (member / "mypackage.egg-info").mkdir()
+        (member / "mypackage.egg-info" / "PKG-INFO").write_text("metadata")
+
+        # --- OS/IDE 산출물 파일 ---
+        (member / ".DS_Store").write_text("macos thumbnail cache")
+        (member / "Thumbs.db").write_text("windows thumbnail cache")
+
+        # --- 중첩 경로: node_modules 가 서브 디렉터리 안에 있어도 차단 ---
+        (member / "web" / "frontend" / "node_modules" / "react").mkdir(parents=True)
+        (member / "web" / "frontend" / "node_modules" / "react" / "index.js").write_text("react")
+
+        # --- 정상 파일: 반드시 머지돼야 함 ---
+        (member / "web" / "frontend" / "src").mkdir(parents=True)
+        (member / "web" / "frontend" / "src" / "foo.tsx").write_text("export default () => <div/>")
+        (member / "app.py").write_text("# main app")
+
+        merger = WorkspaceMerger(main, conflicts)
+        rep = merger.merge(member, "M001")
+
+        # 정상 파일 머지 확인 (positive)
+        assert (main / "web" / "frontend" / "src" / "foo.tsx").exists(), "foo.tsx 가 머지되지 않음"
+        assert (main / "app.py").exists(), "app.py 가 머지되지 않음"
+        assert "web/frontend/src/foo.tsx" in rep.copied
+        assert "app.py" in rep.copied
+
+        # 차단 대상이 main 에 없는지 확인 (negative)
+        for dname in blocked_dirs:
+            assert not (main / dname).exists(), f"{dname} 이 main 으로 유출됨"
+
+        assert not (main / "mypackage.egg-info").exists(), "*.egg-info 가 main 으로 유출됨"
+        assert not (main / ".DS_Store").exists(), ".DS_Store 가 main 으로 유출됨"
+        assert not (main / "Thumbs.db").exists(), "Thumbs.db 가 main 으로 유출됨"
+        assert not (main / "web" / "frontend" / "node_modules").exists(), \
+            "중첩 node_modules 가 main 으로 유출됨"
+
+        # 충돌 없이 깨끗하게 처리됐는지
+        assert rep.ok(), f"예상치 못한 충돌: {rep.conflicts}"
+
+        # skipped_pattern 에 보고됐는지
+        skipped_str = " ".join(rep.skipped_pattern)
+        for dname in blocked_dirs:
+            assert dname in skipped_str, f"{dname} 이 skipped_pattern 에 없음: {rep.skipped_pattern}"
+        assert "mypackage.egg-info" in skipped_str, f"*.egg-info 가 skipped_pattern 에 없음"
+        assert ".DS_Store" in skipped_str, f".DS_Store 가 skipped_pattern 에 없음"
+        assert "Thumbs.db" in skipped_str, f"Thumbs.db 가 skipped_pattern 에 없음"
+        assert "node_modules" in skipped_str, f"중첩 node_modules 가 skipped_pattern 에 없음"
+
+
 # ---------- path_guard (P5, 2026-05-13 토론 결정 적용) ----------
 
 

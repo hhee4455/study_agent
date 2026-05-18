@@ -34,3 +34,11 @@ venv/
 # 산출물 / 압축
 *.tgz
 *.tar.gz
+
+# --- web build / venv artifacts ---
+web/static/
+**/node_modules/
+**/.vite/
+**/dist/
+**/build/
+.next/

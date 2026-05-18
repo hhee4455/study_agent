@@ -17,6 +17,24 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOT_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 cd "$ROOT_DIR"
 
+# ── REQUIRE_WEB 가드 ────────────────────────────────────────────────────────
+_rw_lower="$(echo "${REQUIRE_WEB:-}" | tr '[:upper:]' '[:lower:]')"
+if [ "$_rw_lower" = "1" ] || [ "$_rw_lower" = "true" ] || [ "$_rw_lower" = "yes" ]; then
+    if [ ! -d "$ROOT_DIR/web/static" ]; then
+        echo "❌ [REQUIRE_WEB] web/static 디렉터리를 찾을 수 없습니다." >&2
+        echo "   경로: $ROOT_DIR/web/static" >&2
+        echo "" >&2
+        echo "   웹 에셋을 먼저 빌드해 주세요:" >&2
+        echo "     scripts/web-venv.sh build" >&2
+        echo "" >&2
+        echo "   웹 에셋 없이 시작하려면 REQUIRE_WEB를 비활성화하세요:" >&2
+        echo "     unset REQUIRE_WEB  (또는 REQUIRE_WEB=0 으로 실행)" >&2
+        exit 1
+    fi
+fi
+unset _rw_lower
+# ── /REQUIRE_WEB 가드 ───────────────────────────────────────────────────────
+
 if [ $# -lt 1 ]; then
     echo "사용법: $0 <spec.md> [추가 옵션]"
     echo ""

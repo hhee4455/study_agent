@@ -39,3 +39,29 @@ def get_state(ws_root: Path, now: float | None = None, ttl_sec: float = 5.0) -> 
 
 def invalidate_cache() -> None:
     _CACHE.update({"ts": 0.0, "key": None, "value": None})
+
+
+def iter_conflict_files(ws_root: Path) -> list[str]:
+    """Return sorted list of *.md filenames in the conflicts directory."""
+    conflicts_dir = ws_root / "state" / "lead" / "conflicts"
+    if not conflicts_dir.is_dir():
+        return []
+    return sorted(p.name for p in conflicts_dir.glob("*.md") if p.is_file())
+
+
+def read_conflict_content(ws_root: Path, filename: str) -> str:
+    """Return text content of a conflict file.
+
+    Raises ValueError if filename escapes the conflicts directory.
+    Raises FileNotFoundError if the file does not exist.
+    """
+    conflicts_dir = ws_root / "state" / "lead" / "conflicts"
+    resolved_dir = conflicts_dir.resolve()
+    candidate = (conflicts_dir / filename).resolve()
+    try:
+        candidate.relative_to(resolved_dir)
+    except ValueError:
+        raise ValueError(f"path escape: {filename}")
+    if not candidate.exists():
+        raise FileNotFoundError(filename)
+    return candidate.read_text(encoding="utf-8")

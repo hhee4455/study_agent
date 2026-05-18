@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   Design Tokens — Single Source of Truth
+   Dark-first palette inspired by Linear / Vercel / Anthropic Console
+   ========================================================================== */
+
+:root {
+  /* ---------- Color — Surface ---------- */
+  --color-bg-base:     #0a0a0a;
+  --color-bg-elevated: #111111;
+  --color-bg-overlay:  #1a1a1a;
+  --color-bg-hover:    #1f1f1f;
+  --color-bg-active:   #262626;
+
+  /* ---------- Color — Foreground ---------- */
+  --color-fg-default:   #ededed;
+  --color-fg-muted:     #a1a1a1;
+  --color-fg-subtle:    #525252;
+  --color-fg-on-accent: #ffffff;
+
+  /* ---------- Color — Border ---------- */
+  --color-border-default: #262626;
+  --color-border-subtle:  #1a1a1a;
+  --color-border-strong:  #404040;
+
+  /* ---------- Color — Accent (primary: violet) ---------- */
+  --color-accent-default: #7c3aed;
+  --color-accent-hover:   #6d28d9;
+  --color-accent-muted:   #1e1033;
+  --color-accent-fg:      #a78bfa;
+
+  /* ---------- Color — Status ---------- */
+  --color-success:       #22c55e;
+  --color-success-muted: #052e16;
+  --color-warning:       #f59e0b;
+  --color-warning-muted: #1c1300;
+  --color-danger:        #ef4444;
+  --color-danger-muted:  #1c0000;
+  --color-info:          #3b82f6;
+  --color-info-muted:    #0b1a2e;
+
+  /* ---------- Color — Agent State ---------- */
+  /* HIRED   → cool gray (onboarding) */
+  --color-state-hired:   #6b7280;
+  /* RUNNING → blue (active) */
+  --color-state-running: #3b82f6;
+  /* WAITING → amber (blocked) */
+  --color-state-waiting: #f59e0b;
+  /* DONE    → green (success) */
+  --color-state-done:    #22c55e;
+  /* FAILED  → red (error) */
+  --color-state-failed:  #ef4444;
+
+  /* ---------- Typography ---------- */
+  --font-sans: 'Inter', 'Geist', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Geist Mono', 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  --font-size-xs:   0.75rem;   /* 12px */
+  --font-size-sm:   0.875rem;  /* 14px */
+  --font-size-base: 1rem;      /* 16px */
+  --font-size-lg:   1.125rem;  /* 18px */
+  --font-size-xl:   1.25rem;   /* 20px */
+  --font-size-2xl:  1.5rem;    /* 24px */
+  --font-size-3xl:  1.875rem;  /* 30px */
+
+  --line-height-tight:   1.25;
+  --line-height-normal:  1.5;
+  --line-height-relaxed: 1.75;
+
+  --font-weight-normal:   400;
+  --font-weight-medium:   500;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+
+  /* ---------- Spacing (4px base scale) ---------- */
+  --space-0:    0px;
+  --space-0\.5: 2px;
+  --space-1:    4px;
+  --space-2:    8px;
+  --space-3:    12px;
+  --space-4:    16px;
+  --space-5:    20px;
+  --space-6:    24px;
+  --space-8:    32px;
+  --space-10:   40px;
+  --space-12:   48px;
+  --space-16:   64px;
+  --space-20:   80px;
+  --space-24:   96px;
+
+  /* ---------- Border Radius ---------- */
+  --radius-none: 0px;
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-xl:   12px;
+  --radius-full: 9999px;
+
+  /* ---------- Shadow (dark-first: black-based + subtle ring) ---------- */
+  --shadow-sm: 0 1px 2px 0 rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.6), 0 2px 4px -2px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.7), 0 4px 6px -4px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.06);
+  --shadow-xl: 0 20px 25px -5px rgba(0,0,0,0.8), 0 8px 10px -6px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.07);
+
+  /* ---------- Z-index ---------- */
+  --z-base:     0;
+  --z-dropdown: 100;
+  --z-sticky:   200;
+  --z-overlay:  300;
+  --z-modal:    400;
+  --z-toast:    500;
+
+  /* ---------- Motion ---------- */
+  --ease-out:     cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out:  cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast:   100ms;
+  --duration-normal: 200ms;
+  --duration-slow:   350ms;
+}
+
+/* ==========================================================================
+   Base Body Styles
+   ========================================================================== */
+
+body {
+  background: var(--color-bg-base);
+  color: var(--color-fg-default);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

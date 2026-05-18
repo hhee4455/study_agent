@@ -30,6 +30,7 @@
 2. **deliverables 의 각 파일 경로를 ws_main_tree 와 대조** — 트리에 있으면 *반드시* `seed_files` 에 포함 (수정 작업). 의존 import 모듈, 같은 패키지의 `__init__.py`, 관련 테스트도 포함.
 3. **산출물 경로는 위 ws_main_tree 에 보이는 디렉토리 구조를 그대로 따른다.** 시드 트리가 `agent_system/lead/...` 면 너도 `agent_system/lead/...`, 시드가 `src/...` 면 그대로 `src/...`. **새 root prefix(예: 시드에 없는 `src/`) 를 만들면 시드와 분리된 새 트리가 머지되어 의도된 정련이 깨진다.** `meta/`, `ws/`, `workspace/` prefix 금지.
 4. mission 에 *수정* / *신규* 명시. 기존 시그니처는 호환 유지.
+5. **`deliverables` / `seed_files` 에 파생 디렉터리·락파일 절대 금지** — `node_modules/`, `.vite/`, `.next/`, `dist/`, `build/`, `__pycache__/`, `*.egg-info/`, `.mypy_cache/`, `.pytest_cache/` 과 `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` 는 포함하지 말 것. ws/main 머지 시 화이트리스트에서 차단되어 머지 실패 + 잡음 로그를 유발한다.
 
 # verify (Evaluator) 토글
 - `true`: 보안/네트워크/DB/마이그레이션 코드, verifier 만으로 시맨틱 부족.
