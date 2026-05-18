@@ -524,8 +524,21 @@ class MemberSpawner:
 
 
 def _predelivery_sanity_check(deliverables: list[str], cwd: Path) -> list[tuple[Path, str]]:
-    """deliverables 가 cwd 내 실재 + size>0 인지 검사 → (path, reason) 위반 목록."""
-    paths = [Path(d) for d in deliverables if d]
+    """deliverables 가 cwd 내 실재 + size>0 인지 검사 → (path, reason) 위반 목록.
+
+    각 항목은 `"path"` 또는 `"path — description"` / `"path - description"` 형식.
+    description 은 떼어내고 path 부분만 검사한다 (`_finalize_brief` 의 seed_files
+    자동 보완 로직과 동일 규칙). 떼어내지 않으면 description 까지 포함된 가짜 경로로
+    Path 가 만들어져 모든 deliverable 이 missing 으로 오판되고 goal 분할 캐스케이드가
+    발생한다.
+    """
+    paths: list[Path] = []
+    for d in deliverables:
+        if not d:
+            continue
+        path_str = str(d).split("—")[0].split(" - ")[0].strip()
+        if path_str:
+            paths.append(Path(path_str))
     if not paths:
         return []
     return missing_or_outside(paths, cwd)

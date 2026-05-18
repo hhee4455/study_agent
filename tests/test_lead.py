@@ -1645,6 +1645,61 @@ def test_deliverable_missing_or_outside_classifies_reasons():
         assert m.get("../sibling.txt") == "outside_cwd"
 
 
+def test_predelivery_sanity_strips_path_description():
+    """deliverable 이 'path — description' 형식이어도 path 부분만 보고 검사한다.
+
+    회귀 방지: 이전 버전은 전체 문자열을 통째로 Path 로 만들어 description 까지 포함된
+    가짜 경로가 생기고 모든 deliverable 이 missing 으로 오판되어 goal 분할이 폭증했다.
+    """
+    from core.session_manager import SessionResult
+    from lead.member import HireBrief, MemberSpawner
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        agents = d / "agents"
+        ws = d / "ws"
+        sp = MemberSpawner(agents, ws, d / "state")
+        brief = HireBrief(
+            agent_id="M001",
+            goal_id="G-x",
+            mission="m",
+            deliverables=[
+                "hello.txt — 첫 줄 작성",
+                "sub/nested.py - 헬퍼 함수 추가",
+                "plain.md",  # description 없는 케이스도 함께
+            ],
+            verification_checks=[],
+            system_prompt="p",
+            allowed_tools=["Write"],
+        )
+        sp.write_brief(brief)
+        # 실제 경로(설명 제외) 에 파일 생성
+        (ws / "M001" / "hello.txt").write_text("hi\n")
+        (ws / "M001" / "sub").mkdir(parents=True, exist_ok=True)
+        (ws / "M001" / "sub" / "nested.py").write_text("x = 1\n")
+        (ws / "M001" / "plain.md").write_text("# plain\n")
+
+        calls = []
+
+        def fake_run(**kw):
+            calls.append(kw.get("task_id"))
+            return SessionResult(
+                success=True,
+                output="ok\n[STATUS:DONE]",
+                error="",
+                session_id="s1",
+                cost_usd=0.1,
+            )
+
+        with _stub_session_manager(fake_run):
+            result = sp.spawn(brief)
+
+        assert result.status == "DONE", result
+        assert len(calls) == 1, f"description strip 실패 → 재spawn 발생: {calls}"
+        msgs = parse_messages(agents / "M001" / "mailbox.md")
+        assert not any("Predelivery Sanity Feedback" in m.body for m in msgs)
+
+
 # ---------- 실행 ----------
 
 if __name__ == "__main__":
