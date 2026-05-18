@@ -111,6 +111,7 @@ class HireBriefSchema(BaseModel):
     system_prompt: str = Field(default="")
     allowed_tools: list[str] | None = Field(default=None)
     verify: bool = Field(default=False)
+    model: Literal["sonnet", "opus"] | None = Field(default=None)
 
     @field_validator("seed_files")
     @classmethod

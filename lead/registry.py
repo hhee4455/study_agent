@@ -29,6 +29,7 @@ class AgentRecord:
     last_error: str = ""
     cost_usd: float = 0.0  # 누적 LLM 비용 — 멤버별 가시화
     last_session_id: str = ""  # claude CLI session id (재spawn 시 --resume 후속용)
+    model: str = ""  # "sonnet" | "opus" | "" — lead 가 채용 시 결정. 빈 값이면 default_model.
 
 
 def _now_iso() -> str:
@@ -129,7 +130,7 @@ class AgentRegistry:
 
     # ---- 변경 ----
 
-    def register(self, agent_id: str, goal_id: str = "") -> AgentRecord:
+    def register(self, agent_id: str, goal_id: str = "", model: str = "") -> AgentRecord:
         if agent_id in self._records:
             raise ValueError(f"agent_id 이미 등록됨: {agent_id}")
         rec = AgentRecord(
@@ -137,6 +138,7 @@ class AgentRegistry:
             status="HIRED",
             goal_id=goal_id,
             hired_at=_now_iso(),
+            model=model,
         )
         self._records[agent_id] = rec
         self.save()

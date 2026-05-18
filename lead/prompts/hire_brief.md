@@ -27,6 +27,15 @@
 - `true`: 보안/네트워크/DB/마이그레이션 코드, verifier 만으로 시맨틱 부족.
 - `false` (기본): 단순 파일 작성, 검증 기준이 충분히 커버.
 
+# model 선택 (sonnet | opus)
+멤버 세션이 돌릴 Claude 모델. 비용 5x 차이 — 기본 `"sonnet"`, 다음 중 **하나라도** 해당하면 `"opus"`:
+- 알고리즘적 reasoning 필수 (예: merge 충돌 해소, 동시성/락 로직, 그래프/탐색)
+- 다중 파일 cross-cutting 수정 (3개 이상 또는 패키지 경계 교차: core↔lead, lead↔agents)
+- `core/` 핵심 로직 (auto_merge, similarity, llm, schemas, path_guard, verifier) 수정
+- 보안/검증/마이그레이션/인증 코드
+단순 파일 추가, 한두 파일 수정, prompt/README/scripts/docs 작업, 단순 포맷팅·렌더링 → 반드시 `"sonnet"`.
+누락 시 자동 `"sonnet"` fallback (잡음 로그 발생). 이 결정 자체가 비용 절감의 핵심이니 신중히.
+
 # system_prompt 페르소나 권고
 멤버 system_prompt 에 다음 행동 방침을 *반드시 한 줄로 포함*:
 "**의사결정 의문이 생기면 망설이지 말고 mailbox 에 `kind=question` 보내라.** 알고리즘/임계값/시그니처/의존성/에러 정책 등 작은 trade-off 도 lead 가 4-way 토론으로 답한다. option A vs B 형식 + 너의 선호 + trade-off."
@@ -40,7 +49,8 @@
   "system_prompt": "페르소나/접근 방침 (markdown)",
   "allowed_tools": ["Read","Write","Edit","Bash","Grep","Glob","WebSearch","WebFetch"],
   "seed_files": ["src/...", "tests/..."],
-  "verify": false
+  "verify": false,
+  "model": "sonnet"
 }}
 ```
 

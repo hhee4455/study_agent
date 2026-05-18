@@ -82,6 +82,9 @@ GOAL_LINE_RE = re.compile(
 # kind="remove" (제거/정리). 누락/오타는 코드 차원에서 거부 후 재시도.
 _VALID_BRIEF_KINDS: tuple[str, ...] = ("new", "refine", "extend", "remove")
 _BRIEF_VALIDATION_MAX_ATTEMPTS = 3
+# 멤버 spawn 시 lead 가 brief.model 로 선택 가능한 모델. 비/잘못된 값 → "sonnet" fallback (비용 최적화).
+_VALID_MEMBER_MODELS: tuple[str, ...] = ("sonnet", "opus")
+_DEFAULT_MEMBER_MODEL: str = "sonnet"
 _MISSION_LABEL_RE = re.compile(r"^\s*\[kind=(?P<k>[a-zA-Z]+)\]\s*")
 
 
@@ -906,14 +909,22 @@ class TeamLead:
             allowed_tools=list(brief_data.get("allowed_tools") or []) or None,
             seed_files=list(brief_data.get("seed_files") or []) or None,
             verify=bool(brief_data.get("verify", False)),
+            model=brief_data.get("model"),
         )
         self.spawner.write_brief(brief)
-        self.registry.register(agent_id, goal_id=target.id)
+        self.registry.register(agent_id, goal_id=target.id, model=brief.model or "")
+        self._log(f"  🎯 {agent_id} model={brief.model or '(default)'}")
 
         # plan.md 갱신 (assigned 마킹)
         target.assigned = agent_id
         render_plan(self.plan_md, "Plan", goals)
-        self.timeline.emit("lead", "hire", agent_id=agent_id, goal=f"{target.id}: {target.title}")
+        self.timeline.emit(
+            "lead",
+            "hire",
+            agent_id=agent_id,
+            goal=f"{target.id}: {target.title}",
+            model=brief.model or "",
+        )
 
         # 첫 instruction
         append_message(
@@ -1015,6 +1026,14 @@ class TeamLead:
         data.setdefault("verification_checks", [])
         data.setdefault("system_prompt", "너는 능력 있는 엔지니어. 미션 완수 후 검증 기준 통과.")
         data["mission"] = _ensure_mission_label(str(data["mission"]), kind)
+
+        # lead 가 결정한 멤버 모델 (sonnet/opus). 누락/오타는 sonnet 으로 떨어뜨려 비용 보호.
+        model_raw = str(data.get("model", "")).strip().lower()
+        if model_raw not in _VALID_MEMBER_MODELS:
+            if model_raw:
+                self._log(f"  🔧 model 잘못된 값 ({model_raw!r}) → {_DEFAULT_MEMBER_MODEL} fallback")
+            model_raw = _DEFAULT_MEMBER_MODEL
+        data["model"] = model_raw
 
         # 자동 보완: deliverables 의 파일 경로가 ws_main 에 실재하면 seed_files 강제 포함.
         # decomposer LLM 이 빠뜨려도 시드 누락 → 100% 충돌 패턴 방지.
@@ -1195,6 +1214,7 @@ class TeamLead:
             deliverables=[],
             verification_checks=[],
             system_prompt=sp.read_text(encoding="utf-8"),
+            model=(rec.model or None) if rec else None,
         )
 
     def _spawn_member(self, brief: HireBrief, resume_count: int) -> SpawnResult:

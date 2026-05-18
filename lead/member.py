@@ -211,6 +211,9 @@ class HireBrief:
     # 채용 라벨: 'new' | 'extend' | 'refine' | 'remove' | None.
     # 'refine' 이면 system_prompt 말미에 write-guard closure 가 합성된다.
     kind: str | None = None
+    # 'sonnet' | 'opus' | None. None 이면 spawner.default_model 사용.
+    # team_lead._finalize_brief 에서 lead 가 결정한 값으로 채워진다.
+    model: str | None = None
 
 
 # driver prompt는 `lead/prompts/driver.md`에서 로드됨.
@@ -395,10 +398,12 @@ class MemberSpawner:
         sp_path = agent_dir / "system_prompt.md"
         sp_path.write_text(self._compose_system_prompt(brief), encoding="utf-8")
 
+        # brief.model 우선 (lead 가 goal 복잡도 따라 선택), 없으면 spawner default 로 fallback.
+        session_model = brief.model or self.default_model
         # allowed_tools 명시 안 됐으면 SessionConfig 기본값 사용 (web+grep+glob 포함).
         if brief.allowed_tools:
             config = SessionConfig(
-                model=self.default_model,
+                model=session_model,
                 max_turns=max_turns,
                 timeout_sec=timeout_sec,
                 system_prompt_path=sp_path,
@@ -406,7 +411,7 @@ class MemberSpawner:
             )
         else:
             config = SessionConfig(
-                model=self.default_model,
+                model=session_model,
                 max_turns=max_turns,
                 timeout_sec=timeout_sec,
                 system_prompt_path=sp_path,
