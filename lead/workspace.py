@@ -42,6 +42,10 @@ SKIP_DIRS = {
     ".idea",
     ".vscode",
     ".seed",  # 멤버 ws 의 시드 원본 사본 — main 에 옮기지 않음
+    # 멤버 spawn 시 write_member_settings 가 만드는 path_guard hook 설정.
+    # 멤버 cwd 절대경로가 박혀 있어 main 으로 머지하면 매번 conflict → opus 토론 폭주.
+    # main 은 자기 .claude/ 를 별도로 가지면 됨 (멤버 인프라이지 프로젝트 코드 아님).
+    ".claude",
 }
 SKIP_FILE_GLOBS = (
     "*.pyc",

@@ -666,6 +666,36 @@ def test_workspace_merge_skips_venv_and_cache():
         assert "__pycache__" in skipped
 
 
+def test_workspace_merge_skips_dot_claude_hook_settings():
+    """`.claude/` (멤버 hook config) 는 머지 제외. main 으로 옮기면 매번 conflict → opus 토론.
+
+    회귀 방지: write_member_settings 가 각 멤버 ws 에 path-specific settings.json 을
+    만들기 때문에, main 으로 머지하면 멤버마다 다른 내용으로 항상 충돌이 발생했다.
+    """
+    from lead.workspace import WorkspaceMerger
+
+    with tempfile.TemporaryDirectory() as d:
+        main = Path(d) / "main"
+        member = Path(d) / "M001"
+        conflicts = Path(d) / "conflicts"
+        main.mkdir()
+        member.mkdir()
+
+        # 멤버 진짜 산출물
+        (member / "real.py").write_text("code")
+        # write_member_settings 가 만드는 hook config
+        (member / ".claude").mkdir()
+        (member / ".claude" / "settings.json").write_text('{"hooks": "..."}')
+
+        merger = WorkspaceMerger(main, conflicts)
+        rep = merger.merge(member, "M001")
+
+        assert (main / "real.py").exists()
+        assert not (main / ".claude").exists(), ".claude 는 main 으로 머지되면 안 됨"
+        assert not rep.conflicts, f".claude 가 충돌로 잡혔다: {rep.conflicts}"
+        assert ".claude" in set(rep.skipped_pattern)
+
+
 # ---------- path_guard (P5, 2026-05-13 토론 결정 적용) ----------
 
 
