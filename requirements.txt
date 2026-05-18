@@ -1,7 +1,10 @@
 # Runtime
 pydantic>=2.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
 
 # Dev / verification (project.md "자동 검증" 항목)
+httpx>=0.23
 pytest>=7.0
 pytest-cov>=4.0
 ruff>=0.1.0

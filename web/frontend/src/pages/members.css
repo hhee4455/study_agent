@@ -1,0 +1,231 @@
+:root {
+  --state-hired: #9ca3af;
+  --state-running: #3b82f6;
+  --state-waiting: #f59e0b;
+  --state-done: #22c55e;
+  --state-failed: #ef4444;
+  --badge-sonnet: #16a34a;
+  --badge-opus: #ea580c;
+}
+
+/* ── Members grid page ── */
+.members-page {
+  padding: 1.5rem;
+}
+
+.members-page h1 {
+  margin-bottom: 1.25rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.members-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.members-empty {
+  color: #6b7280;
+  font-style: italic;
+}
+
+/* ── Member card ── */
+.member-card {
+  display: block;
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.member-card:hover {
+  border-color: #89b4fa;
+  box-shadow: 0 0 0 2px rgba(137, 180, 250, 0.2);
+}
+
+.member-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.member-card-id {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+/* ── Status dot ── */
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.status-dot.HIRED   { background: var(--state-hired); }
+.status-dot.RUNNING { background: var(--state-running); }
+.status-dot.WAITING { background: var(--state-waiting); }
+.status-dot.DONE    { background: var(--state-done); }
+.status-dot.FAILED  { background: var(--state-failed); }
+
+/* ── Model badge pill ── */
+.model-badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-left: auto;
+}
+
+.model-badge.sonnet  { background: var(--badge-sonnet); color: #fff; }
+.model-badge.opus    { background: var(--badge-opus); color: #fff; }
+.model-badge.unknown { background: #4b5563; color: #d1d5db; }
+
+.member-card-goal {
+  font-size: 0.8rem;
+  color: #a6adc8;
+  margin-bottom: 0.4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-card-cost {
+  font-size: 0.85rem;
+  color: #cdd6f4;
+  font-weight: 500;
+}
+
+/* ── MemberDetail page ── */
+.member-detail {
+  padding: 1.5rem;
+  max-width: 860px;
+}
+
+.member-detail-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #313244;
+}
+
+.member-detail-header h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.85rem;
+  color: #a6adc8;
+}
+
+.detail-section {
+  margin-bottom: 2rem;
+}
+
+.detail-section h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: #cba6f7;
+}
+
+.detail-pre {
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 0.4rem;
+  padding: 1rem;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+/* ── Mailbox thread ── */
+.mailbox-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.mailbox-message {
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 0.4rem;
+  padding: 0.75rem 1rem;
+}
+
+.mailbox-msg-meta {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+  color: #a6adc8;
+  margin-bottom: 0.4rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.mailbox-msg-kind {
+  background: #313244;
+  border-radius: 9999px;
+  padding: 0.05rem 0.45rem;
+  font-weight: 600;
+}
+
+.mailbox-msg-body {
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #cdd6f4;
+}
+
+/* ── Verification checks table ── */
+.verification-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.verification-table th,
+.verification-table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #313244;
+}
+
+.verification-table th {
+  color: #a6adc8;
+  font-weight: 600;
+}
+
+.check-pass { color: var(--state-done); font-weight: 700; }
+.check-fail { color: var(--state-failed); font-weight: 700; }
+
+/* ── Navigation ── */
+.back-link {
+  display: inline-block;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: #89b4fa;
+  text-decoration: none;
+}
+
+.back-link:hover { text-decoration: underline; }

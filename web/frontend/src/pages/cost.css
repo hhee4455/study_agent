@@ -1,0 +1,84 @@
+.cost-page {
+  padding: 1.5rem;
+  max-width: 960px;
+}
+
+.cost-page h1 {
+  margin-bottom: 1.5rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.cost-section {
+  margin-bottom: 2.5rem;
+}
+
+.cost-section h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: #cba6f7;
+}
+
+.cost-empty {
+  color: #6b7280;
+  font-style: italic;
+  font-size: 0.9rem;
+}
+
+.cost-error {
+  color: var(--state-failed, #ef4444);
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 0.4rem;
+  padding: 0.5rem 0.75rem;
+}
+
+/* ── Gauge bars ── */
+.gauge-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.gauge-item {
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.gauge-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: #a6adc8;
+  margin-bottom: 0.5rem;
+}
+
+.gauge-values {
+  color: #cdd6f4;
+  font-weight: 500;
+}
+
+.gauge-track {
+  height: 10px;
+  background: #313244;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.gauge-fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.4s ease;
+}
+
+.gauge-pct {
+  font-size: 0.75rem;
+  color: #6b7280;
+  text-align: right;
+  margin-top: 0.3rem;
+}

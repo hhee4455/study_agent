@@ -544,3 +544,87 @@ def test_eta_token_present_in_dashboard_py() -> None:
     assert src.exists(), "dashboard.py 가 존재해야 함"
     text = src.read_text(encoding="utf-8")
     assert "ETA" in text, "dashboard.py 에 ETA 토큰이 없음"
+
+
+# ---------------------------------------------------------------------------
+# M022 신규 추가 — efficiency 필드 (turn/resume_count/hire_retry_count) 회귀 테스트
+# ---------------------------------------------------------------------------
+
+
+def test_member_row_has_efficiency_fields() -> None:
+    """MemberRow 에 turn/resume_count/hire_retry_count 필드가 기본값 0 으로 존재."""
+    row = MemberRow("M001", "RUNNING", "G-test", "2026-01-01T00:00:00Z", 0.1)
+    assert hasattr(row, "turn")
+    assert hasattr(row, "resume_count")
+    assert hasattr(row, "hire_retry_count")
+    assert row.turn == 0
+    assert row.resume_count == 0
+    assert row.hire_retry_count == 0
+
+
+def test_collect_state_efficiency_fields_propagate(tmp_path: Path) -> None:
+    """agents.json 의 last_msg_id → turn, last_resume → resume_count 로 매핑."""
+    lead_dir = tmp_path / "state" / "lead"
+    lead_dir.mkdir(parents=True)
+    (lead_dir / "agents.json").write_text(
+        json.dumps(
+            {
+                "M001": {
+                    "status": "RUNNING",
+                    "goal_id": "G-test",
+                    "last_msg_id": 5,
+                    "hired_at": "2026-01-01T00:00:00Z",
+                    "completed_at": "",
+                    "last_resume": 2,
+                    "last_error": "",
+                    "cost_usd": 0.0,
+                    "last_session_id": "",
+                }
+            }
+        )
+    )
+    state = collect_state(tmp_path)
+    m001 = next(m for m in state.members if m.agent_id == "M001")
+    assert m001.turn == 5
+    assert m001.resume_count == 2
+    assert m001.hire_retry_count == 0  # mailbox 없음 → 0 fallback
+
+
+def test_collect_state_hire_retry_count_from_mailbox(tmp_path: Path) -> None:
+    """mailbox 에 kind=instruction 2건 → hire_retry_count == 1."""
+    lead_dir = tmp_path / "state" / "lead"
+    agents_dir = tmp_path / "state" / "agents" / "M001"
+    lead_dir.mkdir(parents=True)
+    agents_dir.mkdir(parents=True)
+    (lead_dir / "agents.json").write_text(
+        json.dumps(
+            {
+                "M001": {
+                    "status": "RUNNING",
+                    "goal_id": "G-test",
+                    "last_msg_id": 3,
+                    "hired_at": "",
+                    "completed_at": "",
+                    "last_resume": 0,
+                    "last_error": "",
+                    "cost_usd": 0.0,
+                    "last_session_id": "",
+                }
+            }
+        )
+    )
+    (agents_dir / "mailbox.md").write_text(
+        "<!-- MSG id=1 from=lead to=M001 kind=instruction ts=2026-01-01T00:00:00Z -->\n"
+        "initial hire\n"
+        "<!-- /MSG -->\n"
+        "<!-- MSG id=2 from=M001 to=lead kind=status ts=2026-01-01T01:00:00Z -->\n"
+        "waiting\n"
+        "<!-- /MSG -->\n"
+        "<!-- MSG id=3 from=lead to=M001 kind=instruction ts=2026-01-01T02:00:00Z -->\n"
+        "retry brief\n"
+        "<!-- /MSG -->\n",
+        encoding="utf-8",
+    )
+    state = collect_state(tmp_path)
+    m001 = next(m for m in state.members if m.agent_id == "M001")
+    assert m001.hire_retry_count == 1

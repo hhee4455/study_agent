@@ -80,11 +80,24 @@ def _install_stubs() -> None:
         prune_plan_backups=lambda *a, **kw: None,
         validate_decomposer_output=lambda *a, **kw: None,
     )
+    def _format_status_line(
+        active: int = 0,
+        queued: int = 0,
+        conflicts: int = 0,
+        spent_usd: float = 0.0,
+        eta_minutes: int = 0,
+    ) -> str:
+        return (
+            f"active={active} queued={queued} conflicts={conflicts}"
+            f" spent=${spent_usd:.2f} eta={eta_minutes}m"
+        )
+
     _stub_module(
         "core.budget",
         BudgetExceeded=_StubExc,
         BudgetManager=_Stub,
         BudgetLimits=_Stub,
+        format_status_line=_format_status_line,
     )
     _stub_module("core.health", HealthMonitor=_Stub)
     _stub_module(

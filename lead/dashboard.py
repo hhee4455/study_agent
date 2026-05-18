@@ -49,6 +49,9 @@ _MSG_HEADER_RE = re.compile(
     r"(?:\s+ref=\d+)?\s+ts=(?P<ts>\S+)\s*-->"
 )
 
+# hire retry 집계용 — kind=instruction 메시지 헤더 매칭.
+_MSG_INSTRUCTION_RE = re.compile(r"<!--\s*MSG\s[^>]*\bkind=instruction\b")
+
 
 @dataclass
 class MemberRow:
@@ -59,6 +62,9 @@ class MemberRow:
     goal_id: str
     last_msg_ts: str
     cost_usd: float
+    turn: int = 0
+    resume_count: int = 0
+    hire_retry_count: int = 0
 
 
 @dataclass
@@ -182,12 +188,16 @@ def _collect_members(agents_json: Path, agents_root: Path) -> list[MemberRow]:
             _log.warning("agents.json 읽기 실패 — 디스크 스캔으로 fallback: %s", e)
 
     for aid, rec in index.items():
+        mailbox = agents_root / aid / "mailbox.md"
         rows[aid] = MemberRow(
             agent_id=aid,
             status=_safe_str(rec.get("status"), "HIRED"),
             goal_id=_safe_str(rec.get("goal_id"), ""),
-            last_msg_ts=_last_msg_ts(agents_root / aid / "mailbox.md"),
+            last_msg_ts=_last_msg_ts(mailbox),
             cost_usd=_safe_float(rec.get("cost_usd"), 0.0),
+            turn=_safe_int(rec.get("last_msg_id"), 0),
+            resume_count=_safe_int(rec.get("last_resume"), 0),
+            hire_retry_count=_count_instruction_retries(mailbox),
         )
 
     # agents.json 에 없는 디렉토리도 흡수 (재기동 직후 rehydrate 전 상태)
@@ -213,6 +223,9 @@ def _collect_members(agents_json: Path, agents_root: Path) -> list[MemberRow]:
                 goal_id="",
                 last_msg_ts=_last_msg_ts(d / "mailbox.md"),
                 cost_usd=0.0,
+                turn=0,
+                resume_count=0,
+                hire_retry_count=_count_instruction_retries(d / "mailbox.md"),
             )
 
     return sorted(rows.values(), key=lambda r: r.agent_id)
@@ -447,6 +460,21 @@ def _format_eta(pending: int, completed_last_hour: int) -> str:
         return f"ETA: {eta_str} (최근 1h 기준 {completed_last_hour} goals/h)"
     except Exception:
         return "ETA: 산정 불가 (최근 1h 진행 없음)"
+
+
+def _count_instruction_retries(mailbox_md: Path) -> int:
+    """mailbox 의 kind=instruction 메시지 수 - 1 = 채용 brief 재시도 횟수.
+
+    최초 hire 지시는 1건이므로 초과분만 retry 로 집계. 파일 없으면 0 fallback.
+    """
+    if not mailbox_md.exists():
+        return 0
+    try:
+        text = mailbox_md.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    count = len(_MSG_INSTRUCTION_RE.findall(text))
+    return max(0, count - 1)
 
 
 def _last_msg_ts(mailbox_md: Path) -> str:
