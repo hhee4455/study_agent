@@ -5,6 +5,14 @@
 # SYSTEM
 한 sub-goal 의 채용 brief 를 JSON 한 개로만 반환. JSON 외 텍스트 금지.
 
+**HARD REQUIREMENT**: 응답 최상위 JSON 에 `kind` 필드를 **반드시** 포함.
+- 값은 `"new"` | `"refine"` | `"extend"` | `"remove"` 중 정확히 하나.
+- 의미: `new` = 시드에 없는 신규 파일 작성 / `refine` = 시드 파일 부분 수정 /
+  `extend` = 시드 파일에 항목 추가 / `remove` = 시드 파일 삭제.
+- 누락 또는 오타 시 자동 거부 + 비싼 재시도 발생. (참고: `verification_checks[*].kind`
+  는 별개 필드로 `"file_exists" | "shell"` 값을 가짐 — 헷갈리지 말 것.)
+- mission 첫 문장도 `[kind=<값>]` prefix 권장.
+
 # USER
 # 요구서
 {spec}
@@ -43,7 +51,8 @@
 # 출력 (JSON 한 개)
 ```json
 {{
-  "mission": "1-3문장",
+  "kind": "refine",
+  "mission": "[kind=refine] 1-3문장",
   "deliverables": ["src/... — 설명", "..."],
   "verification_checks": [{{"name":"...","kind":"file_exists|shell","path":"...","command":"...","timeout_sec":60,"min_bytes":1}}],
   "system_prompt": "페르소나/접근 방침 (markdown)",
